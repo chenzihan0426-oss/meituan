@@ -15,6 +15,7 @@ from . import rules
 from .models import (Conflict, Cost, Decision, Disposition, Edit, EditType,
                      Option, Participant, Plan, ReviewRound, Status)
 from .planner import estimate_gmv, _build_timeline
+from .tips import build_tips
 
 # 引擎能建模的过敏原词表（PRD §5：过敏原过滤是硬要求）。命中才据此筛店。
 KNOWN_ALLERGENS = ["海鲜", "花生", "坚果", "乳制品", "牛奶", "鸡蛋", "麸质", "大豆", "芒果", "虾", "蟹"]
@@ -66,6 +67,7 @@ def run_review_round(plan: Plan, participants: list[Participant],
 
     merged.recompute_open_questions()
     merged.timeline = _build_timeline(merged, merged_constraints)
+    merged.tips = build_tips(merged, merged_constraints)
     merged.gmv_estimate = estimate_gmv(merged, party_size)
     rr.merged_plan = merged
     rr._constraints = merged_constraints  # 给 finalize 用
@@ -243,5 +245,6 @@ def finalize_review(rr: ReviewRound, party_size: int = 3) -> Plan:
                 dec.status = Status.CONFIRMED   # A 已亲自裁决且无硬约束冲突 -> 视为已确认
     merged.recompute_open_questions()
     merged.timeline = _build_timeline(merged, constraints)
+    merged.tips = build_tips(merged, constraints)
     merged.gmv_estimate = estimate_gmv(merged, party_size)
     return merged

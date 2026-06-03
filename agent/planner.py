@@ -11,6 +11,7 @@ from typing import Optional
 from . import rules
 from .intent import Intent
 from .models import (Cost, Decision, Disposition, Option, Plan, Slot, Status)
+from .tips import build_tips
 from .tools import ToolBox
 
 
@@ -104,6 +105,7 @@ def build_first_plan(intent: Intent, tb: ToolBox, party_size: int = 3) -> Plan:
 
     plan = Plan(version=1, decisions=decisions)
     plan.timeline = _build_timeline(plan, c)
+    plan.tips = build_tips(plan, c)
     plan.recompute_open_questions()
     plan.gmv_estimate = estimate_gmv(plan, party_size)
     return plan
@@ -271,6 +273,30 @@ def _hm(total_min: int) -> str:
     return f"{(total_min // 60) % 24:02d}:{total_min % 60:02d}"
 
 
+# 交通：市区出行约 15km/h（含找车/红灯/找车位），落在早晚高峰再乘堵车系数
+_PEAK = [(7 * 60, 9 * 60, "早高峰"), (17 * 60, 19 * 60, "晚高峰")]
+
+
+def _peak_label(minute: int):
+    for a, b, name in _PEAK:
+        if a <= minute < b:
+            return name
+    return None
+
+
+def _travel_minutes(dist_km) -> int:
+    d = dist_km if isinstance(dist_km, (int, float)) and dist_km > 0 else 3.0
+    return max(15, int(round(d * 4)))   # ~15km/h 的保守市区车程
+
+
+def _dist_of(dec) -> float:
+    if dec and dec.chosen:
+        v = dec.chosen.get("distance_km")
+        if isinstance(v, (int, float)) and v > 0:
+            return float(v)
+    return 3.0
+
+
 def _build_timeline(plan: Plan, c: dict) -> list[Slot]:
     act = plan.find_by_type("choose_activity")
     rest = plan.find_by_type("choose_restaurant")
@@ -281,28 +307,48 @@ def _build_timeline(plan: Plan, c: dict) -> list[Slot]:
     end = _parse_return_minutes(ret) if ret else None
     end = end if end is not None else 19 * 60 + 30   # 默认 19:30 到家
 
-    # 倒排：从'到家时刻'往前推每个环节的时长，让整条线真正卡在你定的时间结束
-    blocks = []   # (时长分钟, 标题, 说明)
+    # 倒排：从'到家时刻'往前推每个环节，让整条线真正卡在你定的时间结束。
+    # 通勤段按真实距离估车程，落在早晚高峰再加堵车 buffer。
+    blocks = []   # {dur, title, note, travel}
     if nap and nap.chosen:
-        blocks.append((40, "孩子午睡口子", "5 岁娃下午易困，先补觉（建议项，待您定）"))
+        blocks.append({"dur": 40, "title": "孩子午睡口子",
+                       "note": "5 岁娃下午易困，先补觉（建议项，待您定）"})
     if act and act.chosen:
-        dur = int(round(float(act.chosen.get("duration_h", 2.0) or 2.0) * 60))
-        blocks.append((30, "出发", "避开午后高峰，控制在'别太远'范围"))
-        blocks.append((dur, act.chosen.label, act.reasoning.split("；")[0]))
-        blocks.append((30, "前往餐厅", "顺路、不绕远"))
+        ad = _dist_of(act)
+        blocks.append({"dur": _travel_minutes(ad), "title": "出发去玩",
+                       "note": f"离家约 {ad}km", "travel": True})
+        adur = int(round(float(act.chosen.get("duration_h", 2.0) or 2.0) * 60))
+        blocks.append({"dur": adur, "title": act.chosen.label,
+                       "note": act.reasoning.split("；")[0]})
+        blocks.append({"dur": _travel_minutes(_dist_of(rest)), "title": "前往餐厅",
+                       "note": "顺路过去", "travel": True})
     if rest and rest.chosen:
-        blocks.append((90, f"用餐 @ {rest.chosen.label}", rest.reasoning.split("；")[0]))
+        blocks.append({"dur": 90, "title": f"用餐 @ {rest.chosen.label}",
+                       "note": rest.reasoning.split("；")[0]})
     if gift and gift.chosen:
-        blocks.append((30, "礼物惊喜（花+票，待确认）", "情感高光，建议项"))
+        blocks.append({"dur": 30, "title": "礼物惊喜（花+票，待确认）",
+                       "note": "情感高光，建议项"})
 
-    total = sum(b[0] for b in blocks)
-    cursor = end - total                      # 行程起点 = 到家时刻 - 总时长
-    slots = []
-    for dur, title, note in blocks:
-        slots.append(Slot(_hm(cursor), _hm(cursor + dur), title, note))
-        cursor += dur
+    def _layout():
+        cur = end - sum(b["dur"] for b in blocks)
+        for b in blocks:
+            b["_s"], b["_e"] = cur, cur + b["dur"]
+            cur = b["_e"]
+
+    _layout()
+    # 第二趟：给落在高峰的通勤段加堵车 buffer + 提示（再重排一次）
+    for b in blocks:
+        if b.get("travel"):
+            pk = _peak_label(b["_s"])
+            if pk:
+                base = b["dur"]
+                b["dur"] = int(round(base * 1.5))
+                b["note"] = f"{pk}路上堵，已多留 {b['dur'] - base} 分钟，建议打车并尽量错峰"
+    _layout()
+
+    slots = [Slot(_hm(b["_s"]), _hm(b["_e"]), b["title"], b["note"]) for b in blocks]
     if ret:
-        slots.append(Slot(_hm(end), _hm(end + 0), f"到家（按您定的：{ret}）",
+        slots.append(Slot(_hm(end), _hm(end), f"到家（按您定的：{ret}）",
                           "set_return_time 已由 A 确认，整条行程已按它倒排"))
     else:
         slots.append(Slot(_hm(end), _hm(end), "散场 / 回家（时间待确认）",

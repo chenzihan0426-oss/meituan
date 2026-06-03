@@ -21,6 +21,7 @@ from . import llm  # 复用配置加载 + SSL 上下文
 _AROUND = "https://restapi.amap.com/v5/place/around"
 _REGEO = "https://restapi.amap.com/v3/geocode/regeo"     # 逆地理：坐标 → 地名
 _GEOCODE = "https://restapi.amap.com/v3/geocode/geo"     # 正向：地址 → 坐标
+_WEATHER = "https://restapi.amap.com/v3/weather/weatherInfo"  # 实时天气
 CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".amap_cache")
 
 
@@ -182,6 +183,24 @@ def resolve_gps(lng: float, lat: float) -> dict:
     except Exception:
         area = "你的位置"
     return {"loc": loc, "area": area}
+
+
+def weather(loc: str) -> dict | None:
+    """loc='lng,lat'(GCJ-02) → 实时天气 {weather,temp,wind,city}；取不到返回 None。"""
+    try:
+        rc = _api(_REGEO, {"location": loc, "extensions": "base"}).get("regeocode") or {}
+        adcode = (rc.get("addressComponent") or {}).get("adcode")
+        if not adcode or isinstance(adcode, list):
+            return None
+        data = _api(_WEATHER, {"city": adcode, "extensions": "base"})
+        lives = data.get("lives") or []
+        if not lives:
+            return None
+        w = lives[0]
+        return {"weather": w.get("weather"), "temp": _num(w.get("temperature")),
+                "wind": w.get("windpower"), "city": w.get("city")}
+    except Exception:
+        return None
 
 
 def search_center(constraints: dict | None) -> str:

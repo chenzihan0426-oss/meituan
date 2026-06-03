@@ -239,4 +239,8 @@ def _final_summary(plan: Plan, tb: ToolBox) -> None:
         if d.chosen:
             mark = "✅"
             print(f"  {mark} {d.description}：{d.chosen.label}")
+    if plan.tips:
+        print(f"\n{D.BOLD}🤝 出发前，几句贴心提醒：{D.RESET}")
+        for t in plan.tips:
+            print(f"   {t.get('icon', '·')} {t.get('text', '')}")
     print(f"\n{D.GREEN}{D.BOLD}🎉 全员满意 → 所有单子下完 → 计划已发出。{D.RESET}")

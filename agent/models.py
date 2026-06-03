@@ -140,6 +140,7 @@ class Plan:
     timeline: list[Slot] = field(default_factory=list)
     open_questions: list[Decision] = field(default_factory=list)   # ask 类，拦在执行前
     gmv_estimate: float = 0.0
+    tips: list = field(default_factory=list)   # 出行/饮食温馨提示（[{icon,text}]）
 
     def find(self, decision_id: str) -> Optional[Decision]:
         for d in self.decisions:

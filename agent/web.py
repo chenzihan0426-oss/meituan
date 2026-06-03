@@ -44,6 +44,7 @@ from .planner import (_build_restaurant_decision, _build_timeline,     # noqa: E
 from .review import (finalize_review, resolve_conflict,                # noqa: E402
                      run_review_round)
 from .scenarios import get_scenario                                    # noqa: E402
+from .tips import build_tips                                           # noqa: E402
 from .tools import RESTAURANTS, ToolBox                                # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -140,6 +141,7 @@ def _ser_plan(p):
         "timeline": [{"start": s.start, "end": s.end, "title": s.title, "reason": s.reason}
                      for s in p.timeline],
         "open_questions": [d.id for d in p.open_questions],
+        "tips": list(p.tips or []),
     }
 
 
@@ -250,6 +252,7 @@ def api_answer(body: dict) -> dict:
         _reselect_restaurant(plan, constraints)
     plan.recompute_open_questions()
     plan.timeline = _build_timeline(plan, constraints)
+    plan.tips = build_tips(plan, constraints)
     plan.gmv_estimate = estimate_gmv(plan, s["party"])
     return {"ok": True, "plan": _ser_plan(plan),
             "candidates": [_ser_opt(o) for o in (plan.find_by_type("choose_restaurant").options
@@ -636,6 +639,12 @@ textarea:focus,input:focus,select:focus{border-color:var(--b2);background:#fff;b
 .egs{margin-top:9px;font-size:13px;color:var(--muted)}
 .eg{display:inline-block;background:#fff;border:1px solid var(--line);border-radius:20px;padding:5px 12px;margin:5px 6px 0 0;cursor:pointer;color:var(--ink2);font-size:12.5px;transition:.12s}
 .eg:hover{border-color:var(--b2);color:var(--b2)}
+.tips{margin-top:14px;background:#f0fbf5;border:1px solid #c4ecd5;border-radius:12px;padding:12px 14px}
+.tips:empty{display:none}
+.tips-h{font-weight:800;font-size:13.5px;color:var(--green);margin-bottom:8px}
+.tip{display:flex;gap:9px;padding:5px 0;font-size:13.5px;color:var(--ink2);line-height:1.65;border-top:1px dashed #d4eede}
+.tip:first-of-type{border-top:none}
+.tip-i{flex:none;font-size:15px}
 .tagline{margin-top:12px;padding:11px 14px;border-radius:12px;background:linear-gradient(135deg,#fff5ef,#ffeef3);border:1px solid #ffd9c9;font-size:14px;color:var(--ink2);line-height:1.7}
 .tagline b{color:var(--b2)}
 @keyframes rise{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
@@ -821,6 +830,7 @@ details.adv{margin:10px 0}details.adv summary{cursor:pointer;color:var(--b2);fon
     <div class="facts"><div id="known"></div><div id="unknown"></div></div>
     <div id="decisions" style="margin-top:8px"></div>
     <div id="timeline" class="timeline"></div>
+    <div id="tips"></div>
     <div id="replanBanner" class="replan hidden"></div>
     <div style="margin-top:16px"><button class="btn" onclick="submitAnswers()">提交回答，继续 →</button></div>
   </div>
@@ -831,6 +841,7 @@ details.adv{margin:10px 0}details.adv summary{cursor:pointer;color:var(--b2);fon
       <p>攒局不是一个人的事。点下面按钮模拟"局里的人"各自改方案——我自动合并无争议的，撞车处按「内容契合度 × 谁说的」给带理由的建议。</p></div></div>
     <div class="reviewsum" id="reviewSummary"></div>
     <div id="reviewTimeline" class="timeline"></div>
+    <div id="reviewTips"></div>
     <div class="sharebox">
       <button class="btn ghost sm" type="button" onclick="shareLink()">📲 生成链接，发给朋友自己改</button>
       <div id="shareRow" class="hidden">
@@ -989,6 +1000,11 @@ function renderTimeline(tl){
   }).join('');
   return '<div class="tl-title">⏱ 行程时间线（随你定的到家时间自动倒排）</div>'+rows;
 }
+function renderTips(tips){
+  if(!tips||!tips.length)return '';
+  return '<div class="tips"><div class="tips-h">🤝 出发前，几句贴心提醒</div>'+
+    tips.map(t=>`<div class="tip"><span class="tip-i">${esc(t.icon||'·')}</span><span>${esc(t.text)}</span></div>`).join('')+'</div>';
+}
 function replanBannerHtml(plan){
   const f=t=>plan.decisions.find(d=>d.type===t);
   const rest=f('choose_restaurant'),bdg=f('set_budget'),ret=f('set_return_time');
@@ -1016,6 +1032,7 @@ async function start(){
   $('unknown').innerHTML='<span class="unknown">? 我还不知道的（不替你乱填）：</span>'+(r.unknown.length?r.unknown.map(k=>'<br>　· '+esc(k)).join(''):'无');
   $('decisions').innerHTML=r.plan.decisions.map((d,i)=>decCard(d,true,i)).join('');
   $('timeline').innerHTML=renderTimeline(r.plan.timeline);
+  $('tips').innerHTML=renderTips(r.plan.tips);
   $('replanBanner').classList.add('hidden');
   setGmv(r.plan.gmv_estimate);
   reach(1);
@@ -1031,11 +1048,13 @@ async function submitAnswers(){
   $('summary').innerHTML='<div class="stat green" style="flex:1"><b>✓</b><span>方案已按你的回答重新规划</span></div>';
   const banner=replanBannerHtml(r.plan);
   $('timeline').innerHTML=renderTimeline(r.plan.timeline);
+  $('tips').innerHTML=renderTips(r.plan.tips);
   $('replanBanner').innerHTML=banner;$('replanBanner').classList.remove('hidden');
   setGmv(r.plan.gmv_estimate);
   S.candidates=r.candidates||[];S.pulled=0;
   $('reviewSummary').innerHTML='<div class="replan">'+banner+'</div>';
   $('reviewTimeline').innerHTML=renderTimeline(r.plan.timeline);
+  $('reviewTips').innerHTML=renderTips(r.plan.tips);
   buildQuickEdits();
   const sel=$('edRest');sel.innerHTML=S.candidates.map(o=>`<option value="${o.id}">${esc(o.label)}${optFacts(o)}</option>`).join('');
   $('autoMerged').innerHTML='';$('conflicts').innerHTML='';$('resolveRow').classList.add('hidden');$('v2Box').classList.add('hidden');
@@ -1121,7 +1140,7 @@ async function applyResolve(){
   const r=await post('/api/resolve',{sid:S.sid,resolutions});
   if(!r.ok){alert(r.error);return;}
   $('v2Box').classList.remove('hidden');$('v2Ver').textContent='(v'+r.plan.version+')';
-  $('v2Decisions').innerHTML=r.plan.decisions.map((d,i)=>decCard(d,false,i)).join('')+renderTimeline(r.plan.timeline);
+  $('v2Decisions').innerHTML=r.plan.decisions.map((d,i)=>decCard(d,false,i)).join('')+renderTimeline(r.plan.timeline)+renderTips(r.plan.tips);
   setGmv(r.plan.gmv_estimate);$('v2Box').scrollIntoView({behavior:'smooth',block:'center'});
 }
 
