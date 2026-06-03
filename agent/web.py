@@ -376,17 +376,17 @@ def api_edits(sid: str) -> dict:
 
 
 def _map_spots(s: dict) -> list:
-    """家 → 玩 → 吃 的坐标点（只取有真实坐标的，供静态地图打点）。"""
+    """按游玩顺序的坐标点 [(loc, 顺序号), ...]：家(1) → 玩(2) → 吃(3)，只取有真实坐标的。"""
     cons = s.get("constraints", {})
-    spots = [(amap.search_center(cons), "家")]
+    ordered = [amap.search_center(cons)]
     plan = s["plan"]
     act = plan.find_by_type("choose_activity")
     if act and act.chosen and act.chosen.get("location"):
-        spots.append((act.chosen.get("location"), "玩"))
+        ordered.append(act.chosen.get("location"))
     rest = plan.find_by_type("choose_restaurant")
     if rest and rest.chosen and rest.chosen.get("location"):
-        spots.append((rest.chosen.get("location"), "吃"))
-    return spots
+        ordered.append(rest.chosen.get("location"))
+    return [(loc, str(i + 1)) for i, loc in enumerate(ordered)]   # 路线上标 1→2→3 顺序
 
 
 def api_map(sid: str):
@@ -708,11 +708,15 @@ textarea:focus,input:focus,select:focus{border-color:var(--b2);background:#fff;b
 .membar{margin-top:12px;padding:11px 14px;border-radius:12px;background:#eef3ff;border:1px solid #cfdcff;font-size:13.5px;color:var(--ink2);line-height:1.7}
 .membar b{color:var(--blue)}
 .membar .forget{color:var(--red);cursor:pointer;font-size:12.5px;margin-left:6px;text-decoration:underline}
-.quad{margin-top:14px;background:#fff;border:1px solid var(--line);border-radius:12px;padding:12px 14px}
-.quad-h{font-weight:800;font-size:13.5px;color:var(--ink2);margin-bottom:6px}
-.quad-svg{width:100%;height:auto;display:block}
-.quad-legend{font-size:12px;color:var(--muted);margin-top:4px}
-.quad-legend .lg{font-size:13px}.quad-legend .lg.g{color:var(--green)}.quad-legend .lg.a{color:var(--amber)}.quad-legend .lg.r{color:var(--red)}
+.quad{margin-top:14px;background:#fff;border:1px solid var(--line);border-radius:14px;padding:14px 16px;box-shadow:var(--shadow2)}
+.quad-h{font-weight:800;font-size:15px;color:var(--ink);margin-bottom:3px}
+.quad-sub{font-size:12.5px;color:var(--muted);line-height:1.6;margin-bottom:8px}
+.quad-svg{width:100%;height:auto;display:block;background:var(--soft);border-radius:10px}
+.qlist{margin-top:10px;display:flex;flex-direction:column;gap:5px}
+.qrow{display:flex;align-items:center;gap:9px;font-size:13px}
+.qno{flex:none;width:19px;height:19px;border-radius:50%;color:#fff;font-weight:800;font-size:11px;display:flex;align-items:center;justify-content:center}
+.qname{flex:1;color:var(--ink2)}
+.qd{font-weight:800;font-size:12.5px}
 .mapwrap{margin-top:14px;border:1px solid var(--line);border-radius:12px;overflow:hidden}
 .mapimg{width:100%;display:block}
 .mapcap{font-size:12.5px;color:var(--ink2);padding:8px 12px;background:var(--soft);font-weight:600}
@@ -1089,26 +1093,40 @@ function renderTimeline(tl){
 }
 function renderQuadrant(decs){
   if(!decs||!decs.length)return '';
-  const W=330,H=200,PADX=40;
-  const xc=c=>PADX+(W-PADX-14)*Math.max(0,Math.min(1,c||0));
-  const yc=cost=>({low:H-44,mid:(H-30)/2,high:24})[cost]||((H-30)/2);
-  const col=d=>({auto:'#12a05a',suggest:'#cf7a09',ask:'#e23b5a'})[d.disposition]||'#888';
-  let body='';
+  const DI={auto:{c:'#12a05a',t:'直接定',e:'✅'},suggest:{c:'#cf7a09',t:'给建议',e:'💡'},ask:{c:'#e23b5a',t:'问你',e:'❓'}};
+  // 画布：x=把握(0→1)，y=代价(低在下、高在上)
+  const W=340,H=215,L=34,R=12,T=22,B=40;
+  const xc=c=>L+(W-L-R)*Math.max(.04,Math.min(.96,c||0));
+  const yc=cost=>({low:H-B-14,mid:(T+H-B)/2,high:T+14}[cost]??(T+H-B)/2);
+  // 三色分区背景（和规则一致：代价高→问；代价低且把握高→做；其余→建议），淡色铺底
+  const midY=(T+H-B)/2, x40=xc(0.4), x70=xc(0.7);
+  const zones=`
+    <rect x="${L}" y="${T}" width="${W-L-R}" height="${midY-T}" fill="#e23b5a" opacity=".07"/>
+    <rect x="${L}" y="${midY}" width="${x40-L}" height="${H-B-midY}" fill="#e23b5a" opacity=".07"/>
+    <rect x="${x40}" y="${midY}" width="${x70-x40}" height="${H-B-midY}" fill="#cf7a09" opacity=".08"/>
+    <rect x="${x70}" y="${midY}" width="${W-R-x70}" height="${H-B-midY}" fill="#12a05a" opacity=".10"/>
+    <text x="${W-R-4}" y="${T+16}" text-anchor="end" font-size="10" fill="#e23b5a" opacity=".8">代价高 → 一律先问你</text>
+    <text x="${W-R-4}" y="${H-B-6}" text-anchor="end" font-size="10.5" fill="#12a05a" opacity=".9">把握高·代价低 → 放心替你定</text>
+    <text x="${L+4}" y="${H-B-6}" font-size="10" fill="#e23b5a" opacity=".8">没把握 → 问你</text>`;
+  let dots='';
   decs.forEach((d,i)=>{
-    const x=xc(d.confidence),y=yc(d.cost)+(i%2?7:-7);
-    body+=`<circle cx="${x}" cy="${y}" r="7" fill="${col(d)}" opacity=".9"/>`;
-    body+=`<text x="${x+10}" y="${y+4}" font-size="10" fill="#444b60">${esc((d.description||'').slice(0,7))}</text>`;
+    const m=DI[d.disposition]||DI.suggest, x=xc(d.confidence), y=yc(d.cost)+(i%2?8:-8);
+    dots+=`<circle cx="${x}" cy="${y}" r="9.5" fill="${m.c}"/><text x="${x}" y="${y+3.5}" text-anchor="middle" font-size="10.5" font-weight="700" fill="#fff">${i+1}</text>`;
   });
-  return `<div class="quad"><div class="quad-h">🧠 决策大脑：每个决定落在「置信度 × 代价」的哪一格</div>
-   <svg viewBox="0 0 ${W} ${H}" class="quad-svg">
-    <rect x="${PADX}" y="6" width="${W-PADX-6}" height="${H-30}" fill="none" stroke="#e9ebf3"/>
-    <line x1="${PADX}" y1="${(H-30)/2+6}" x2="${W-6}" y2="${(H-30)/2+6}" stroke="#eef0f6" stroke-dasharray="3 3"/>
-    <text x="${PADX}" y="${H-4}" font-size="10" fill="#8a90a4">← 没把握　置信度　有把握 →</text>
-    <text x="2" y="16" font-size="10" fill="#8a90a4">代价高↑</text>
-    <text x="2" y="${H-34}" font-size="10" fill="#8a90a4">代价低</text>
-    ${body}
-   </svg>
-   <div class="quad-legend"><span class="lg g">●</span> 直接定　<span class="lg a">●</span> 给建议　<span class="lg r">●</span> 停下来问</div>
+  // 下方清单：每个编号 → 决定名 + 处置（解决"不知道在讲什么"）
+  const list=decs.map((d,i)=>{const m=DI[d.disposition]||DI.suggest;
+    return `<div class="qrow"><span class="qno" style="background:${m.c}">${i+1}</span><span class="qname">${esc(d.description)}</span><span class="qd" style="color:${m.c}">${m.e} ${m.t}</span></div>`;}).join('');
+  return `<div class="quad">
+    <div class="quad-h">🧠 我怎么决定「该不该替你做主」</div>
+    <div class="quad-sub">越往右我越有把握、越往上代价越大。<b style="color:var(--green)">右下角</b>放心替你定，<b style="color:var(--red)">越往左上</b>越要先问你。</div>
+    <svg viewBox="0 0 ${W} ${H}" class="quad-svg">
+      ${zones}
+      <rect x="${L}" y="${T}" width="${W-L-R}" height="${H-T-B}" fill="none" stroke="#e3e6f0" rx="6"/>
+      <text x="${L}" y="${H-12}" font-size="10.5" fill="#8a90a4">← 没把握　　我有多大把握　　有把握 →</text>
+      <text x="9" y="${T+12}" font-size="10.5" fill="#8a90a4" transform="rotate(-90 9 ${(T+H-B)/2})">代价 低→高</text>
+      ${dots}
+    </svg>
+    <div class="qlist">${list}</div>
   </div>`;
 }
 const AUTO_LV=['conservative','balanced','bold'];
@@ -1123,9 +1141,18 @@ async function setAutonomy(v){
   $('decisions').innerHTML=r.plan.decisions.map((d,i)=>decCard(d,true,i)).join('');
   $('quadrant').innerHTML=renderQuadrant(r.plan.decisions);
 }
-function showMap(box){
+function showMap(box,legend){
   if(!S.sid){$(box).innerHTML='';return;}
-  $(box).innerHTML=`<div class="mapwrap"><img class="mapimg" src="/api/map?sid=${encodeURIComponent(S.sid)}&t=${(new Date()).getTime()}" alt="路线图" onerror="var w=this.closest('.mapwrap');if(w)w.style.display='none'"><div class="mapcap">🗺️ 真实地图路线：家 → 玩 → 吃（高德实景，评委可当场搜证）</div></div>`;
+  const leg=legend||'家 → 玩 → 吃';
+  $(box).innerHTML=`<div class="mapwrap"><img class="mapimg" src="/api/map?sid=${encodeURIComponent(S.sid)}&t=${(new Date()).getTime()}" alt="路线图" onerror="var w=this.closest('.mapwrap');if(w)w.style.display='none'"><div class="mapcap">🗺️ 真实路线（高德实景·可当场搜证）　${leg}</div></div>`;
+}
+function mapLegend(plan){
+  const f=t=>plan.decisions.find(d=>d.type===t);
+  const act=f('choose_activity'),rest=f('choose_restaurant');
+  let out=['<b>①</b> 家（出发）'],n=2;
+  if(act&&act.chosen){out.push(`<b>${n}</b> 玩：${esc(act.chosen.label)}`);n++;}
+  if(rest&&rest.chosen){out.push(`<b>${n}</b> 吃：${esc(rest.chosen.label)}`);n++;}
+  return out.join('　·　');
 }
 async function forgetPrefs(){await post('/api/forget',{});$('memoryBanner').classList.add('hidden');}
 function renderTips(tips){
@@ -1161,7 +1188,7 @@ async function start(){
   $('decisions').innerHTML=r.plan.decisions.map((d,i)=>decCard(d,true,i)).join('');
   $('quadrant').innerHTML=renderQuadrant(r.plan.decisions);
   $('autonomy').value=1;$('autonomyLabel').textContent='平衡';
-  showMap('mapbox');
+  showMap('mapbox',mapLegend(r.plan));
   $('timeline').innerHTML=renderTimeline(r.plan.timeline);
   $('tips').innerHTML=renderTips(r.plan.tips);
   $('replanBanner').classList.add('hidden');
