@@ -162,6 +162,50 @@ def _ser_conflict(c, idx):
 # ---------------------------------------------------------------------------
 # 交互端点逻辑
 # ---------------------------------------------------------------------------
+def _apply_trust(plan, constraints: dict, party: int) -> dict:
+    """信任账户：按已建立的信任，① 把'反复确认过的事'直接替你定（❓→✅，错了随时撤）；
+    ② 其余未拍板决定按信任程度调 做/建议/问。让'该替你决定多少'成为一段会成长的关系。"""
+    from . import rules
+    t = prefs.load_trust()
+    score, confirms = t["score"], t["confirms"]
+    level = prefs.trust_level(score)
+    saved = prefs.load()
+    unlocked, budget_unlocked = [], False
+    _UNLOCK = {"set_budget": ("budget_per_capita", lambda v: f"人均 {int(v)} 以内"),
+               "set_return_time": ("return_time", lambda v: str(v))}
+    for d in plan.decisions:                       # ① 信任解锁：替你定你反复确认过的事
+        if d.type in _UNLOCK and confirms.get(d.type, 0) >= 2:
+            key, fmt = _UNLOCK[d.type]
+            val = saved.get(key)
+            if val in (None, "", []):
+                continue
+            d.chosen = Option(label=fmt(val), kind="value")
+            d.status = Status.CONFIRMED
+            d.confidence = 0.9
+            d.confidence_basis = f"信任账户：你以前 {confirms[d.type]} 次都这么定"
+            d.disposition = Disposition.AUTO
+            d.reasoning = (f"🔓 这件事你以前确认过 {confirms[d.type]} 次（都按「{fmt(val)}」）——"
+                           f"信任够了，这次我替你定了，错了随时撤。")
+            if key == "budget_per_capita":
+                constraints["budget_per_capita"] = int(val)
+                budget_unlocked = True
+            else:
+                constraints["return_time"] = val
+            unlocked.append({"type": d.type, "label": fmt(val)})
+    if budget_unlocked:
+        _reselect_restaurant(plan, constraints)
+    for d in plan.decisions:                       # ② 其余按信任程度调处置
+        if d.status in (Status.CONFIRMED, Status.DONE):
+            continue
+        d.disposition = rules.derive_disposition(d.confidence, d.cost, level)
+    plan.timeline = _build_timeline(plan, constraints)
+    plan.tips = build_tips(plan, constraints)
+    plan.gmv_estimate = estimate_gmv(plan, party)
+    plan.recompute_open_questions()
+    return {"score": score, "level": level, "label": prefs.trust_label(score),
+            "unlocked": unlocked}
+
+
 def api_start(body: dict) -> dict:
     goal = (body.get("goal") or "").strip()
     if not goal:
@@ -182,6 +226,7 @@ def api_start(body: dict) -> dict:
     tb = ToolBox(seed=7, fast=True, use_llm=want_real,
                  forced=dict(INTERACTIVE_FORCED) if exceptions else {})
     plan = build_first_plan(intent, tb, party_size=party)
+    trust = _apply_trust(plan, constraints, party)   # 按信任账户调整方案（脑洞主线）
     sid = _new_session({"intent": intent, "constraints": constraints, "tb": tb,
                         "plan": plan, "party": party, "executed": False, "use_llm": want_real})
     mem = prefs.load()
@@ -189,7 +234,7 @@ def api_start(body: dict) -> dict:
             "known": intent.known, "unknown": intent.unknown,
             "party": party, "plan": _ser_plan(plan),
             "source": tb.last_source, "llm_used": want_real,
-            "memory": {"prefs": mem, "summary": prefs.summary(mem)}}
+            "memory": {"prefs": mem, "summary": prefs.summary(mem)}, "trust": trust}
 
 
 def api_geo(body: dict) -> dict:
@@ -239,16 +284,20 @@ def api_answer(body: dict) -> dict:
     answers = body.get("answers") or {}
     suggestions = body.get("suggestions") or {}
     budget_changed = False
+    confirmed_asks, accepted_sugg, confirmed_types = 0, 0, []
     for d in plan.decisions:
         if d.id in answers and d.disposition == Disposition.ASK:
             txt = str(answers[d.id]).strip()
             if txt:
                 _apply_open_answer(d, txt, constraints)
+                confirmed_asks += 1
+                confirmed_types.append(d.type)
                 if d.type == "set_budget":
                     budget_changed = True
         if d.id in suggestions and d.disposition == Disposition.SUGGEST:
             if suggestions[d.id]:
                 d.status = Status.CONFIRMED
+                accepted_sugg += 1
             else:
                 d.chosen, d.status = None, Status.PENDING
     # 你回答预算后，按新预算重选餐厅——否则推荐还停在'预算未知'时的选择（与你的调整脱节）
@@ -259,9 +308,14 @@ def api_answer(body: dict) -> dict:
     plan.tips = build_tips(plan, constraints)
     plan.gmv_estimate = estimate_gmv(plan, s["party"])
     prefs.save(constraints)   # 记住你这次确认的预算/到家时间/忌口，下次先按这个（仍会问你）
+    # 信任账户：你每确认一次它的判断，信任就长一点（下次它敢替你多定一些）
+    before = prefs.load_trust()["score"]
+    t = prefs.bump_trust(confirmed_asks, accepted_sugg, confirmed_types)
     return {"ok": True, "plan": _ser_plan(plan),
             "candidates": [_ser_opt(o) for o in (plan.find_by_type("choose_restaurant").options
-                                                 if plan.find_by_type("choose_restaurant") else [])]}
+                                                 if plan.find_by_type("choose_restaurant") else [])],
+            "trust": {"score": t["score"], "delta": t["score"] - before,
+                      "level": prefs.trust_level(t["score"]), "label": prefs.trust_label(t["score"])}}
 
 
 def _resolve_option(after_id: str, plan) -> Option | None:
@@ -701,6 +755,15 @@ textarea:focus,input:focus,select:focus{border-color:var(--b2);background:#fff;b
 .egs{margin-top:9px;font-size:13px;color:var(--muted)}
 .eg{display:inline-block;background:#fff;border:1px solid var(--line);border-radius:20px;padding:5px 12px;margin:5px 6px 0 0;cursor:pointer;color:var(--ink2);font-size:12.5px;transition:.12s}
 .eg:hover{border-color:var(--b2);color:var(--b2)}
+.trustbar{margin:12px 0 4px;padding:12px 14px;border-radius:12px;background:linear-gradient(135deg,#eef4ff,#f6eeff);border:1px solid #d3ddff}
+.trustbar.hidden{display:none}
+.trust-top{display:flex;justify-content:space-between;align-items:center;font-size:13.5px;font-weight:700;color:var(--ink2)}
+.trust-top b{color:var(--blue);font-size:16px}
+.trust-lv{color:var(--b2);font-weight:800;font-size:12.5px}
+.trust-track{height:9px;border-radius:6px;background:#dfe5f5;margin-top:9px;overflow:hidden}
+.trust-fill{height:100%;background:linear-gradient(90deg,#3a6df0,#ff5d87);border-radius:6px;transition:width .7s cubic-bezier(.2,.7,.2,1)}
+.trust-unlock{margin-top:10px;font-size:13px;color:var(--green);background:var(--greenbg);border:1px solid #b6e6cc;border-radius:9px;padding:8px 11px;line-height:1.6}
+.trust-unlock b{color:var(--green)}
 .autorow{display:flex;align-items:center;gap:12px;margin-top:14px;padding:11px 14px;background:var(--soft);border:1px solid var(--line);border-radius:12px;flex-wrap:wrap}
 .autorow .auto-l{font-size:13.5px;font-weight:700;color:var(--ink2)}
 .autorow input[type=range]{flex:1;min-width:140px;accent-color:var(--b2)}
@@ -908,6 +971,7 @@ details.adv{margin:10px 0}details.adv summary{cursor:pointer;color:var(--b2);fon
     <div class="shd"><div class="no">2</div><div><h2>这是我的方案，你来拍板</h2>
       <p>每个决定都标了「我有多大把握」和「我打算怎么处理」。<b style="color:var(--red)">红色❓需要你回答</b>，黄色💡勾一下是否采纳。</p></div></div>
     <div class="srcline" id="src"></div>
+    <div id="trustBar" class="trustbar hidden"></div>
     <div class="stats" id="summary"></div>
     <div class="autorow">
       <span class="auto-l">🎚️ 我希望它替我做主的程度</span>
@@ -1131,6 +1195,18 @@ function renderQuadrant(decs){
 }
 const AUTO_LV=['conservative','balanced','bold'];
 const AUTO_TXT={conservative:'保守·多问我',balanced:'平衡',bold:'大胆·多替我定'};
+function levelToSlider(l){return ({conservative:0,balanced:1,bold:2})[l]??1;}
+function renderTrust(trust){
+  if(!trust){$('trustBar').classList.add('hidden');return;}
+  const lv=trust.level||'balanced',pct=Math.max(4,Math.min(100,trust.score||0));
+  let unlock='';
+  if(trust.unlocked&&trust.unlocked.length)
+    unlock=`<div class="trust-unlock">🔓 信任已建立——这次我直接替你定了：${trust.unlocked.map(u=>'<b>'+esc(u.label)+'</b>').join('、')}（你确认得越多，我越敢做主；错了随时撤）</div>`;
+  $('trustBar').innerHTML=`<div class="trust-top"><span>🤝 信任账户 <b>${trust.score||0}</b><span style="color:var(--muted);font-size:12px">/100</span></span><span class="trust-lv">${esc(trust.label||'')}</span></div>
+    <div class="trust-track"><div class="trust-fill" style="width:${pct}%"></div></div>${unlock}`;
+  $('trustBar').classList.remove('hidden');
+  $('autonomy').value=levelToSlider(lv);$('autonomyLabel').textContent=AUTO_TXT[lv];  // 旋钮同步到挣得的自主度
+}
 async function setAutonomy(v){
   const level=AUTO_LV[+v]||'balanced';
   $('autonomyLabel').textContent=AUTO_TXT[level];
@@ -1188,6 +1264,7 @@ async function start(){
   $('decisions').innerHTML=r.plan.decisions.map((d,i)=>decCard(d,true,i)).join('');
   $('quadrant').innerHTML=renderQuadrant(r.plan.decisions);
   $('autonomy').value=1;$('autonomyLabel').textContent='平衡';
+  renderTrust(r.trust);   // 信任账户：进度条 + 解锁提示 + 旋钮同步到已挣得的自主度
   showMap('mapbox',mapLegend(r.plan));
   $('timeline').innerHTML=renderTimeline(r.plan.timeline);
   $('tips').innerHTML=renderTips(r.plan.tips);
@@ -1217,7 +1294,9 @@ async function submitAnswers(){
   if(!r.ok){alert(r.error);return;}
   $('decisions').innerHTML=r.plan.decisions.map((d,i)=>decCard(d,false,i)).join('');
   $('summary').innerHTML='<div class="stat green" style="flex:1"><b>✓</b><span>方案已按你的回答重新规划</span></div>';
-  const banner=replanBannerHtml(r.plan);
+  let banner=replanBannerHtml(r.plan);
+  if(r.trust&&r.trust.delta>0)
+    banner+=`<small>🤝 信任 +${r.trust.delta} → 现在 ${r.trust.score}/100（${esc(r.trust.label)}）。你确认得越多，下次我越敢替你定。</small>`;
   $('timeline').innerHTML=renderTimeline(r.plan.timeline);
   $('tips').innerHTML=renderTips(r.plan.tips);
   $('replanBanner').innerHTML=banner;$('replanBanner').classList.remove('hidden');
