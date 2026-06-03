@@ -755,20 +755,20 @@ textarea:focus,input:focus,select:focus{border-color:var(--b2);background:#fff;b
 .egs{margin-top:9px;font-size:13px;color:var(--muted)}
 .eg{display:inline-block;background:#fff;border:1px solid var(--line);border-radius:20px;padding:5px 12px;margin:5px 6px 0 0;cursor:pointer;color:var(--ink2);font-size:12.5px;transition:.12s}
 .eg:hover{border-color:var(--b2);color:var(--b2)}
-.trustbar{margin:12px 0 4px;padding:12px 14px;border-radius:12px;background:linear-gradient(135deg,#eef4ff,#f6eeff);border:1px solid #d3ddff}
+.trustbar{margin:12px 0 4px;padding:13px 15px;border-radius:12px;background:#fff;border:1px solid var(--line);border-left:3px solid var(--blue);box-shadow:var(--shadow2)}
 .trustbar.hidden{display:none}
 .trust-top{display:flex;justify-content:space-between;align-items:center;font-size:13.5px;font-weight:700;color:var(--ink2)}
 .trust-top b{color:var(--blue);font-size:16px}
 .trust-lv{color:var(--b2);font-weight:800;font-size:12.5px}
 .trust-track{height:9px;border-radius:6px;background:#dfe5f5;margin-top:9px;overflow:hidden}
 .trust-fill{height:100%;background:linear-gradient(90deg,#3a6df0,#ff5d87);border-radius:6px;transition:width .7s cubic-bezier(.2,.7,.2,1)}
-.trust-unlock{margin-top:10px;font-size:13px;color:var(--green);background:var(--greenbg);border:1px solid #b6e6cc;border-radius:9px;padding:8px 11px;line-height:1.6}
+.trust-unlock{margin-top:10px;font-size:13px;color:var(--green);background:var(--greenbg);border-radius:9px;padding:8px 11px;line-height:1.6}
 .trust-unlock b{color:var(--green)}
 .autorow{display:flex;align-items:center;gap:12px;margin-top:14px;padding:11px 14px;background:var(--soft);border:1px solid var(--line);border-radius:12px;flex-wrap:wrap}
 .autorow .auto-l{font-size:13.5px;font-weight:700;color:var(--ink2)}
 .autorow input[type=range]{flex:1;min-width:140px;accent-color:var(--b2)}
 .autorow .auto-v{font-weight:800;color:var(--b2);min-width:84px;text-align:right}
-.membar{margin-top:12px;padding:11px 14px;border-radius:12px;background:#eef3ff;border:1px solid #cfdcff;font-size:13.5px;color:var(--ink2);line-height:1.7}
+.membar{margin-top:12px;padding:12px 15px;border-radius:12px;background:#fff;border:1px solid var(--line);border-left:3px solid var(--blue);box-shadow:var(--shadow2);font-size:13.5px;color:var(--ink2);line-height:1.7}
 .membar b{color:var(--blue)}
 .membar .forget{color:var(--red);cursor:pointer;font-size:12.5px;margin-left:6px;text-decoration:underline}
 .quad{margin-top:14px;background:#fff;border:1px solid var(--line);border-radius:14px;padding:14px 16px;box-shadow:var(--shadow2)}
@@ -783,20 +783,20 @@ textarea:focus,input:focus,select:focus{border-color:var(--b2);background:#fff;b
 .mapwrap{margin-top:14px;border:1px solid var(--line);border-radius:12px;overflow:hidden}
 .mapimg{width:100%;display:block}
 .mapcap{font-size:12.5px;color:var(--ink2);padding:8px 12px;background:var(--soft);font-weight:600}
-.cf{margin-top:8px;padding:9px 12px;border-radius:10px;background:#fff3df;border:1px solid #ffe0b0;color:var(--amber);font-size:13px;line-height:1.6}
-.tips{margin-top:14px;background:#f0fbf5;border:1px solid #c4ecd5;border-radius:12px;padding:12px 14px}
+.cf{margin-top:8px;padding:9px 12px;border-radius:10px;background:var(--soft);border-left:3px solid var(--amber);color:var(--amber);font-size:13px;line-height:1.6}
+.tips{margin-top:14px;background:#fff;border:1px solid var(--line);border-left:3px solid var(--green);box-shadow:var(--shadow2);border-radius:12px;padding:13px 15px}
 .tips:empty{display:none}
 .tips-h{font-weight:800;font-size:13.5px;color:var(--green);margin-bottom:8px}
-.tip{display:flex;gap:9px;padding:5px 0;font-size:13.5px;color:var(--ink2);line-height:1.65;border-top:1px dashed #d4eede}
+.tip{display:flex;gap:9px;padding:5px 0;font-size:13.5px;color:var(--ink2);line-height:1.65;border-top:1px dashed var(--line)}
 .tip:first-of-type{border-top:none}
 .tip-i{flex:none;font-size:15px}
-.tagline{margin-top:12px;padding:11px 14px;border-radius:12px;background:linear-gradient(135deg,#fff5ef,#ffeef3);border:1px solid #ffd9c9;font-size:14px;color:var(--ink2);line-height:1.7}
+.tagline{margin-top:12px;padding:12px 15px;border-radius:12px;background:#fff;border:1px solid var(--line);border-left:3px solid var(--b2);box-shadow:var(--shadow2);font-size:14px;color:var(--ink2);line-height:1.75}
 .tagline b{color:var(--b2)}
 @keyframes rise{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
 .reveal{animation:rise .5s both cubic-bezier(.2,.7,.2,1)}
-.aispeak{position:relative;margin:-2px 0 12px;padding:13px 15px;border-radius:14px;background:linear-gradient(135deg,#fff0e6,#ffe6ef);border:1px solid #ffcdbb;color:var(--ink);font-size:14px;line-height:1.75}
+.aispeak{position:relative;margin:-2px 0 12px;padding:13px 15px;border-radius:12px;background:#fff;border:1px solid var(--line);border-left:3px solid var(--b2);box-shadow:var(--shadow2);color:var(--ink);font-size:14px;line-height:1.75}
 .aispeak b{color:var(--b2)}
-.aispeak .aitag{display:block;margin-top:7px;font-size:12px;color:var(--amber);font-weight:700}
+.aispeak .aitag{display:block;margin-top:7px;font-size:12px;color:var(--muted);font-weight:700}
 .timeline{margin-top:14px;background:var(--soft);border:1px solid var(--line);border-radius:12px;padding:12px 14px}
 .timeline:empty{display:none}
 .tl-title{font-weight:800;font-size:13.5px;margin-bottom:8px;color:var(--ink2)}
@@ -805,7 +805,7 @@ textarea:focus,input:focus,select:focus{border-color:var(--b2);background:#fff;b
 .tl-time{color:var(--b2);font-weight:700;min-width:104px;font-variant-numeric:tabular-nums}
 .tl-act{color:var(--ink2)}
 .tl-act b{color:var(--ink)}
-.replan{margin-top:14px;padding:12px 14px;border-radius:12px;background:var(--greenbg);border:1px solid #b6e6cc;color:var(--green);font-weight:700;font-size:13.5px}
+.replan{margin-top:14px;padding:12px 15px;border-radius:12px;background:#fff;border:1px solid var(--line);border-left:3px solid var(--green);box-shadow:var(--shadow2);color:var(--green);font-weight:700;font-size:13.5px}
 .replan:empty,.replan.hidden{display:none}
 .replan small{display:block;font-weight:500;color:var(--ink2);margin-top:4px}
 .sharebox{margin:14px 0;padding:12px 14px;background:var(--soft);border:1px dashed #c9cfe0;border-radius:12px}
@@ -919,7 +919,7 @@ details.adv{margin:10px 0}details.adv summary{cursor:pointer;color:var(--b2);fon
 <body>
 <div class="bar">
   <div class="brand"><div class="logo">🤖</div>
-    <div><h1>会替你拿主意的活动 Agent</h1><p>该自己定的定，该问你的问 · 还帮整个"局"协调</p></div></div>
+    <div><h1>有主见的决策搭子</h1><p>有分寸 · 敢替你拒绝 · 越用越敢替你做主</p></div></div>
   <div class="tabs"><button id="tabI" class="on" onclick="showTab('I')">✍️ 自己输入</button>
     <button id="tabD" onclick="showTab('D')">🎬 一键演示</button></div>
   <div class="gmvbox"><b id="gmv">¥0</b><span>本次撬动 GMV</span></div>
@@ -932,7 +932,7 @@ details.adv{margin:10px 0}details.adv summary{cursor:pointer;color:var(--b2);fon
   <div id="pGoal" class="card hero">
     <h2>说一句话，我帮你把下午安排明白 ☀️</h2>
     <div class="lead">不是给你一堆链接让你自己挑——而是<b>真的把事办完</b>：去哪玩、去哪吃、要不要排队、确认后一键下单、还能发给家人一起定。</div>
-    <div class="tagline">🤝 像一个<b>真正懂你的朋友</b>：帮你把位订了、把娃的避辣也想到了——但<b>刷你的卡之前，一定先问你一句</b>。</div>
+    <div class="tagline">别的 AI 听话照做；它<b>有主见</b>——你说送蛋糕，它会说"她在减肥，我不建议"；<b>敢替你拒绝</b>、把握高的<b>替你做主</b>、要紧的<b>才问你</b>，还<b>越用越敢替你定</b>。</div>
     <div class="feats">
       <div class="feat g"><div class="fi">✅</div><b>有把握 → 直接定</b><span>常识性的我自己拍板，不烦你</span></div>
       <div class="feat a"><div class="fi">💡</div><b>拿不准 → 给建议</b><span>给方案，最后你点头</span></div>
