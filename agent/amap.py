@@ -22,6 +22,7 @@ _AROUND = "https://restapi.amap.com/v5/place/around"
 _REGEO = "https://restapi.amap.com/v3/geocode/regeo"     # 逆地理：坐标 → 地名
 _GEOCODE = "https://restapi.amap.com/v3/geocode/geo"     # 正向：地址 → 坐标
 _WEATHER = "https://restapi.amap.com/v3/weather/weatherInfo"  # 实时天气
+_STATIC = "https://restapi.amap.com/v3/staticmap"             # 静态地图（返回 PNG）
 CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".amap_cache")
 
 
@@ -203,6 +204,50 @@ def weather(loc: str) -> dict | None:
         return None
 
 
+def staticmap_png(spots: list) -> bytes:
+    """spots: [(loc 'lng,lat'(GCJ02), label单字), ...] → 一张带标记+路线的地图 PNG。
+
+    用现有 Web 服务 key 即可（不需要 JS 地图 key）。带磁盘缓存，离线可复演。
+    """
+    spots = [(loc, lab) for loc, lab in spots if loc]
+    if not spots:
+        raise AmapError("无坐标可画")
+    markers = "|".join(f"large,,{lab}:{loc}" for loc, lab in spots)
+    params = {"size": "750*360", "scale": "2", "markers": markers, "key": _key()}
+    if len(spots) >= 2:
+        params["paths"] = "6,0x3a6df0,1,,:" + ";".join(loc for loc, _ in spots)
+    url = _STATIC + "?" + urllib.parse.urlencode(params)
+    ckey = hashlib.sha256(url.encode()).hexdigest()[:32]
+    cpath = os.path.join(CACHE_DIR, ckey + ".png")
+    if _cfg().get("cache", True) and os.path.exists(cpath):
+        with open(cpath, "rb") as f:
+            return f.read()
+    data = None
+    last = None
+    for _ in range(3):                     # 静态地图偶发 TLS EOF，带 UA + 重试更稳
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=_cfg().get("timeout", 30),
+                                        context=llm._ssl_context({})) as resp:
+                data = resp.read()
+            break
+        except Exception as e:  # noqa
+            last = e
+            data = None
+    if data is None:
+        raise AmapError(f"高德静态地图请求失败：{last}")
+    if data[:1] == b"{":                   # 错误时返回 JSON，不是图
+        raise AmapError("高德静态地图返回错误（非图片）")
+    if _cfg().get("cache", True):
+        try:
+            os.makedirs(CACHE_DIR, exist_ok=True)
+            with open(cpath, "wb") as f:
+                f.write(data)
+        except Exception:
+            pass
+    return data
+
+
 def search_center(constraints: dict | None) -> str:
     """搜索中心：优先用户实时定位，否则回退配置里的'家'（望京）。"""
     cons = constraints or {}
@@ -279,6 +324,7 @@ def _infer_restaurant(poi: dict) -> dict:
         "needs_queue": needs_q, "queue_minutes": 20 if needs_q else 0,
         "has_spicy_option": spicy, "spicy_only": spicy_only,
         "rating": rating, "address": poi.get("address", ""),
+        "location": poi.get("location"),   # 'lng,lat'(GCJ02)，供地图打点
     }
 
 
@@ -364,6 +410,7 @@ def amap_activities(goal: str, constraints: dict, n: int = 8) -> list[dict]:
             "price_per_person": int(_num(biz.get("cost"), _ACT_PRICE.get(cat, 60)) or 0),
             "near_bar_street": "酒吧" in poi.get("address", ""),
             "rating": _num(biz.get("rating")), "address": poi.get("address", ""),
+            "location": poi.get("location"),   # 'lng,lat'(GCJ02)，供地图打点
         })
     if not out:
         raise AmapError("高德无活动结果")

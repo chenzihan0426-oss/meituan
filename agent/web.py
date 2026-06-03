@@ -43,6 +43,7 @@ from .planner import (_build_restaurant_decision, _build_timeline,     # noqa: E
                       _opt_from_restaurant, build_first_plan, estimate_gmv)
 from .review import (finalize_review, resolve_conflict,                # noqa: E402
                      run_review_round)
+from . import prefs                                                    # noqa: E402
 from .scenarios import get_scenario                                    # noqa: E402
 from .tips import build_tips                                           # noqa: E402
 from .tools import RESTAURANTS, ToolBox                                # noqa: E402
@@ -131,6 +132,7 @@ def _ser_dec(d):
         "cost": d.cost.value, "reasoning": d.reasoning, "disposition": d.disposition.value,
         "status": d.status.value, "chosen": _ser_opt(d.chosen),
         "options": [_ser_opt(o) for o in d.options], "history": list(d.confidence_history),
+        "counterfactual": getattr(d, "counterfactual", ""),
     }
 
 
@@ -182,10 +184,12 @@ def api_start(body: dict) -> dict:
     plan = build_first_plan(intent, tb, party_size=party)
     sid = _new_session({"intent": intent, "constraints": constraints, "tb": tb,
                         "plan": plan, "party": party, "executed": False, "use_llm": want_real})
+    mem = prefs.load()
     return {"ok": True, "sid": sid, "goal": goal,
             "known": intent.known, "unknown": intent.unknown,
             "party": party, "plan": _ser_plan(plan),
-            "source": tb.last_source, "llm_used": want_real}
+            "source": tb.last_source, "llm_used": want_real,
+            "memory": {"prefs": mem, "summary": prefs.summary(mem)}}
 
 
 def api_geo(body: dict) -> dict:
@@ -254,6 +258,7 @@ def api_answer(body: dict) -> dict:
     plan.timeline = _build_timeline(plan, constraints)
     plan.tips = build_tips(plan, constraints)
     plan.gmv_estimate = estimate_gmv(plan, s["party"])
+    prefs.save(constraints)   # 记住你这次确认的预算/到家时间/忌口，下次先按这个（仍会问你）
     return {"ok": True, "plan": _ser_plan(plan),
             "candidates": [_ser_opt(o) for o in (plan.find_by_type("choose_restaurant").options
                                                  if plan.find_by_type("choose_restaurant") else [])]}
@@ -368,6 +373,56 @@ def api_edits(sid: str) -> dict:
     if not s:
         return {"ok": False, "error": "会话已过期"}
     return {"ok": True, "edits": list(s.get("remote_edits", []))}
+
+
+def _map_spots(s: dict) -> list:
+    """家 → 玩 → 吃 的坐标点（只取有真实坐标的，供静态地图打点）。"""
+    cons = s.get("constraints", {})
+    spots = [(amap.search_center(cons), "家")]
+    plan = s["plan"]
+    act = plan.find_by_type("choose_activity")
+    if act and act.chosen and act.chosen.get("location"):
+        spots.append((act.chosen.get("location"), "玩"))
+    rest = plan.find_by_type("choose_restaurant")
+    if rest and rest.chosen and rest.chosen.get("location"):
+        spots.append((rest.chosen.get("location"), "吃"))
+    return spots
+
+
+def api_map(sid: str):
+    """返回'家→玩→吃'真实路线静态地图 PNG（bytes）；不可用时返回 None。"""
+    s = SESSIONS.get(sid)
+    if not s or not amap.is_enabled():
+        return None
+    try:
+        return amap.staticmap_png(_map_spots(s))
+    except Exception:
+        return None
+
+
+def api_forget(body: dict) -> dict:
+    """忘记我的偏好（清空跨会话记忆）。"""
+    prefs.clear()
+    return {"ok": True}
+
+
+def api_autonomy(body: dict) -> dict:
+    """自主性旋钮：按 保守/平衡/大胆 重算每个决定的 做/建议/问（不重跑搜索）。"""
+    s = SESSIONS.get(body.get("sid"))
+    if not s:
+        return {"ok": False, "error": "会话已过期"}
+    level = body.get("level", "balanced")
+    if level not in ("conservative", "balanced", "bold"):
+        level = "balanced"
+    from . import rules
+    plan = s["plan"]
+    for d in plan.decisions:
+        if d.status in (Status.CONFIRMED, Status.DONE):
+            continue   # 你已拍板的不动
+        d.disposition = rules.derive_disposition(d.confidence, d.cost, level)
+    plan.recompute_open_questions()
+    s["autonomy"] = level
+    return {"ok": True, "level": level, "plan": _ser_plan(plan)}
 
 
 def api_resolve(body: dict) -> dict:
@@ -518,6 +573,12 @@ class Handler(BaseHTTPRequestHandler):
             self._json(api_plan_view(parse_qs(u.query).get("sid", [""])[0]))
         elif u.path == "/api/edits":
             self._json(api_edits(parse_qs(u.query).get("sid", [""])[0]))
+        elif u.path == "/api/map":
+            png = api_map(parse_qs(u.query).get("sid", [""])[0])
+            if png:
+                self._send(200, png, "image/png")
+            else:
+                self._send(404, b"no map", "text/plain; charset=utf-8")
         elif u.path == "/api/run":
             q = parse_qs(u.query)
             scn = q.get("scenario", ["family"])[0]
@@ -550,7 +611,8 @@ class Handler(BaseHTTPRequestHandler):
         handlers = {"/api/start": api_start, "/api/answer": api_answer,
                     "/api/review": api_review, "/api/resolve": api_resolve,
                     "/api/execute": api_execute, "/api/geo": api_geo,
-                    "/api/submit_edit": api_submit_edit}
+                    "/api/submit_edit": api_submit_edit, "/api/autonomy": api_autonomy,
+                    "/api/forget": api_forget}
         fn = handlers.get(u.path)
         if not fn:
             self._send(404, b"not found", "text/plain; charset=utf-8")
@@ -639,6 +701,22 @@ textarea:focus,input:focus,select:focus{border-color:var(--b2);background:#fff;b
 .egs{margin-top:9px;font-size:13px;color:var(--muted)}
 .eg{display:inline-block;background:#fff;border:1px solid var(--line);border-radius:20px;padding:5px 12px;margin:5px 6px 0 0;cursor:pointer;color:var(--ink2);font-size:12.5px;transition:.12s}
 .eg:hover{border-color:var(--b2);color:var(--b2)}
+.autorow{display:flex;align-items:center;gap:12px;margin-top:14px;padding:11px 14px;background:var(--soft);border:1px solid var(--line);border-radius:12px;flex-wrap:wrap}
+.autorow .auto-l{font-size:13.5px;font-weight:700;color:var(--ink2)}
+.autorow input[type=range]{flex:1;min-width:140px;accent-color:var(--b2)}
+.autorow .auto-v{font-weight:800;color:var(--b2);min-width:84px;text-align:right}
+.membar{margin-top:12px;padding:11px 14px;border-radius:12px;background:#eef3ff;border:1px solid #cfdcff;font-size:13.5px;color:var(--ink2);line-height:1.7}
+.membar b{color:var(--blue)}
+.membar .forget{color:var(--red);cursor:pointer;font-size:12.5px;margin-left:6px;text-decoration:underline}
+.quad{margin-top:14px;background:#fff;border:1px solid var(--line);border-radius:12px;padding:12px 14px}
+.quad-h{font-weight:800;font-size:13.5px;color:var(--ink2);margin-bottom:6px}
+.quad-svg{width:100%;height:auto;display:block}
+.quad-legend{font-size:12px;color:var(--muted);margin-top:4px}
+.quad-legend .lg{font-size:13px}.quad-legend .lg.g{color:var(--green)}.quad-legend .lg.a{color:var(--amber)}.quad-legend .lg.r{color:var(--red)}
+.mapwrap{margin-top:14px;border:1px solid var(--line);border-radius:12px;overflow:hidden}
+.mapimg{width:100%;display:block}
+.mapcap{font-size:12.5px;color:var(--ink2);padding:8px 12px;background:var(--soft);font-weight:600}
+.cf{margin-top:8px;padding:9px 12px;border-radius:10px;background:#fff3df;border:1px solid #ffe0b0;color:var(--amber);font-size:13px;line-height:1.6}
 .tips{margin-top:14px;background:#f0fbf5;border:1px solid #c4ecd5;border-radius:12px;padding:12px 14px}
 .tips:empty{display:none}
 .tips-h{font-weight:800;font-size:13.5px;color:var(--green);margin-bottom:8px}
@@ -827,8 +905,16 @@ details.adv{margin:10px 0}details.adv summary{cursor:pointer;color:var(--b2);fon
       <p>每个决定都标了「我有多大把握」和「我打算怎么处理」。<b style="color:var(--red)">红色❓需要你回答</b>，黄色💡勾一下是否采纳。</p></div></div>
     <div class="srcline" id="src"></div>
     <div class="stats" id="summary"></div>
+    <div class="autorow">
+      <span class="auto-l">🎚️ 我希望它替我做主的程度</span>
+      <input id="autonomy" type="range" min="0" max="2" step="1" value="1" oninput="setAutonomy(this.value)">
+      <span id="autonomyLabel" class="auto-v">平衡</span>
+    </div>
+    <div id="memoryBanner" class="membar hidden"></div>
+    <div id="quadrant"></div>
     <div class="facts"><div id="known"></div><div id="unknown"></div></div>
     <div id="decisions" style="margin-top:8px"></div>
+    <div id="mapbox"></div>
     <div id="timeline" class="timeline"></div>
     <div id="tips"></div>
     <div id="replanBanner" class="replan hidden"></div>
@@ -978,6 +1064,7 @@ function decCard(d,interactive,i){
   h+=confMeter(d.confidence);
   h+=`<div class="basis">依据：${esc(d.confidence_basis)}</div>`;
   h+=`<div class="reason">${esc(d.reasoning)}</div>`;
+  if(d.counterfactual)h+=`<div class="cf">🔮 如果我没拦你：${esc(d.counterfactual)}</div>`;
   (d.history||[]).forEach(x=>h+=`<div class="hist">↻ ${esc(x)}</div>`);
   if(interactive&&!resolved&&d.disposition==='ask')
     h+=`<div class="ask"><div class="ask-q">❓ 需要你回答</div><input class="ask-input fld" data-dec="${d.id}" placeholder="如：人均120以内 / 19:30前到家"></div>`;
@@ -1000,6 +1087,47 @@ function renderTimeline(tl){
   }).join('');
   return '<div class="tl-title">⏱ 行程时间线（随你定的到家时间自动倒排）</div>'+rows;
 }
+function renderQuadrant(decs){
+  if(!decs||!decs.length)return '';
+  const W=330,H=200,PADX=40;
+  const xc=c=>PADX+(W-PADX-14)*Math.max(0,Math.min(1,c||0));
+  const yc=cost=>({low:H-44,mid:(H-30)/2,high:24})[cost]||((H-30)/2);
+  const col=d=>({auto:'#12a05a',suggest:'#cf7a09',ask:'#e23b5a'})[d.disposition]||'#888';
+  let body='';
+  decs.forEach((d,i)=>{
+    const x=xc(d.confidence),y=yc(d.cost)+(i%2?7:-7);
+    body+=`<circle cx="${x}" cy="${y}" r="7" fill="${col(d)}" opacity=".9"/>`;
+    body+=`<text x="${x+10}" y="${y+4}" font-size="10" fill="#444b60">${esc((d.description||'').slice(0,7))}</text>`;
+  });
+  return `<div class="quad"><div class="quad-h">🧠 决策大脑：每个决定落在「置信度 × 代价」的哪一格</div>
+   <svg viewBox="0 0 ${W} ${H}" class="quad-svg">
+    <rect x="${PADX}" y="6" width="${W-PADX-6}" height="${H-30}" fill="none" stroke="#e9ebf3"/>
+    <line x1="${PADX}" y1="${(H-30)/2+6}" x2="${W-6}" y2="${(H-30)/2+6}" stroke="#eef0f6" stroke-dasharray="3 3"/>
+    <text x="${PADX}" y="${H-4}" font-size="10" fill="#8a90a4">← 没把握　置信度　有把握 →</text>
+    <text x="2" y="16" font-size="10" fill="#8a90a4">代价高↑</text>
+    <text x="2" y="${H-34}" font-size="10" fill="#8a90a4">代价低</text>
+    ${body}
+   </svg>
+   <div class="quad-legend"><span class="lg g">●</span> 直接定　<span class="lg a">●</span> 给建议　<span class="lg r">●</span> 停下来问</div>
+  </div>`;
+}
+const AUTO_LV=['conservative','balanced','bold'];
+const AUTO_TXT={conservative:'保守·多问我',balanced:'平衡',bold:'大胆·多替我定'};
+async function setAutonomy(v){
+  const level=AUTO_LV[+v]||'balanced';
+  $('autonomyLabel').textContent=AUTO_TXT[level];
+  if(!S.sid)return;
+  const r=await post('/api/autonomy',{sid:S.sid,level});
+  if(!r.ok)return;
+  $('summary').innerHTML=summaryBanner(r.plan.decisions);
+  $('decisions').innerHTML=r.plan.decisions.map((d,i)=>decCard(d,true,i)).join('');
+  $('quadrant').innerHTML=renderQuadrant(r.plan.decisions);
+}
+function showMap(box){
+  if(!S.sid){$(box).innerHTML='';return;}
+  $(box).innerHTML=`<div class="mapwrap"><img class="mapimg" src="/api/map?sid=${encodeURIComponent(S.sid)}&t=${(new Date()).getTime()}" alt="路线图" onerror="var w=this.closest('.mapwrap');if(w)w.style.display='none'"><div class="mapcap">🗺️ 真实地图路线：家 → 玩 → 吃（高德实景，评委可当场搜证）</div></div>`;
+}
+async function forgetPrefs(){await post('/api/forget',{});$('memoryBanner').classList.add('hidden');}
 function renderTips(tips){
   if(!tips||!tips.length)return '';
   return '<div class="tips"><div class="tips-h">🤝 出发前，几句贴心提醒</div>'+
@@ -1031,9 +1159,25 @@ async function start(){
   $('known').innerHTML='<span class="known">✓ 我读懂的：</span>'+(r.known.length?r.known.map(k=>'<br>　· '+esc(k)).join(''):'（这句话没给明确约束）');
   $('unknown').innerHTML='<span class="unknown">? 我还不知道的（不替你乱填）：</span>'+(r.unknown.length?r.unknown.map(k=>'<br>　· '+esc(k)).join(''):'无');
   $('decisions').innerHTML=r.plan.decisions.map((d,i)=>decCard(d,true,i)).join('');
+  $('quadrant').innerHTML=renderQuadrant(r.plan.decisions);
+  $('autonomy').value=1;$('autonomyLabel').textContent='平衡';
+  showMap('mapbox');
   $('timeline').innerHTML=renderTimeline(r.plan.timeline);
   $('tips').innerHTML=renderTips(r.plan.tips);
   $('replanBanner').classList.add('hidden');
+  // 偏好记忆：记得你→横幅提示 + 预填"停下来问"的输入框（仍由你确认，不静默填）
+  const mem=r.memory&&r.memory.summary;
+  if(mem){
+    $('memoryBanner').innerHTML=`🧠 我记得你：<b>${esc(mem)}</b> —— 这次先按这个预填好了，<b>确认或改都行</b><span class="forget" onclick="forgetPrefs()">忘记我的偏好</span>`;
+    $('memoryBanner').classList.remove('hidden');
+    const p=(r.memory&&r.memory.prefs)||{};
+    r.plan.decisions.forEach(d=>{
+      const inp=document.querySelector('.ask-input[data-dec="'+d.id+'"]');
+      if(!inp)return;
+      if(d.type==='set_budget'&&p.budget_per_capita)inp.value='人均 '+Math.round(p.budget_per_capita)+' 以内';
+      if(d.type==='set_return_time'&&p.return_time)inp.value=p.return_time;
+    });
+  }else $('memoryBanner').classList.add('hidden');
   setGmv(r.plan.gmv_estimate);
   reach(1);
 }

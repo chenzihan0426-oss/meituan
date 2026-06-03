@@ -13,16 +13,38 @@ from .models import Cost, Disposition, Option
 # ---------------------------------------------------------------------------
 # 主轴：confidence × cost -> disposition
 # ---------------------------------------------------------------------------
-def derive_disposition(confidence: float, cost: Cost) -> Disposition:
+def derive_disposition(confidence: float, cost: Cost,
+                       autonomy: str = "balanced") -> Disposition:
     """PRD §0 的那条规则，本项目的'大脑'：
 
         置信度高 且 代价低         -> 直接做（auto）
         置信度低 或 代价高         -> 停下来问（ask）
         其余（中等置信 / 中等代价） -> 给建议（suggest）
+
+    autonomy 是'自主性旋钮'：同一组 (置信度, 代价) 下，用户希望 Agent 多大程度替自己拿主意。
+    它平移阈值——保守=更多停下来问，大胆=更多直接做——但'高代价仍倾向问'这条安全底线不丢。
+    这正是把'该替你决定多少'做成可调函数的体现。
     """
-    if cost == Cost.HIGH or confidence < 0.4:
+    hi = cost == Cost.HIGH
+    low = cost == Cost.LOW
+    if autonomy == "bold":          # 大胆：愿意多替你定，但高代价+低置信仍兜底问
+        if hi and confidence < 0.5:
+            return Disposition.ASK
+        if confidence < 0.35:
+            return Disposition.ASK
+        if confidence >= 0.55 and not hi:
+            return Disposition.AUTO
+        return Disposition.SUGGEST
+    if autonomy == "conservative":  # 保守：宁可多问你，少自作主张
+        if hi or confidence < 0.55:
+            return Disposition.ASK
+        if confidence >= 0.85 and low:
+            return Disposition.AUTO
+        return Disposition.SUGGEST
+    # balanced（默认，保持原行为不变 —— selftest/验收都依赖它）
+    if hi or confidence < 0.4:
         return Disposition.ASK
-    if confidence >= 0.7 and cost == Cost.LOW:
+    if confidence >= 0.7 and low:
         return Disposition.AUTO
     return Disposition.SUGGEST
 

@@ -28,12 +28,14 @@ def _opt_from_gift(g: dict) -> Option:
 
 
 def _mk(dtype: str, desc: str, *, options=None, chosen=None,
-        confidence: float, basis: str, cost: Cost, reasoning: str) -> Decision:
+        confidence: float, basis: str, cost: Cost, reasoning: str,
+        counterfactual: str = "") -> Decision:
     """造一个 Decision，disposition 由 confidence × cost 推导（主轴）。"""
     return Decision(
         type=dtype, description=desc, options=options or [], chosen=chosen,
         confidence=confidence, confidence_basis=basis, cost=cost, reasoning=reasoning,
         disposition=rules.derive_disposition(confidence, cost),
+        counterfactual=counterfactual,
     )
 
 
@@ -79,6 +81,8 @@ def build_first_plan(intent: Intent, tb: ToolBox, party_size: int = 3) -> Plan:
         cost=Cost.HIGH,
         reasoning="这家人均不高（~¥85），但若您本想升级到人均 300 的精致餐厅，我不敢替您定——"
                   "请确认：控制在人均 100 左右，还是放开到 300？",
+        counterfactual="如果我自作主张定了人均 300 那家：可能直接超你预算、孩子也未必吃得惯——"
+                       "钱花出去难收回，所以这条我没敢替你定。",
     ))
 
     # ---- 5. 几点到家：影响整条时间线，错了全盘崩 -> 停下来问（验收 #2）----
@@ -87,6 +91,8 @@ def build_first_plan(intent: Intent, tb: ToolBox, party_size: int = 3) -> Plan:
         confidence=0.25, basis="完全未知；它决定整条时间线，错了全盘崩",
         cost=Cost.HIGH,
         reasoning="请确认今天几点前要到家？（默认按 19:30 排，但不敢替您拍板）",
+        counterfactual="如果我按默认 19:30 硬排：万一你其实要早回接老人/孩子要睡，整条行程全得推翻——"
+                       "影响面太大，所以先问你一句。",
     ))
 
     # ---- 6. 留不留午睡口子：中置信 + 低代价 -> 给建议（验收 #3，仅亲子出游）----

@@ -97,6 +97,8 @@ class Decision:
 
     # 评审过程留痕：置信度被谁的反馈修正过（PRD §3.1 末）
     confidence_history: list[str] = field(default_factory=list)
+    # 反事实：如果我自作主张（不停下来问/不给建议）可能的坏结果——把"懂分寸"的价值讲具体
+    counterfactual: str = ""
 
     def __post_init__(self) -> None:
         # 自检：灵魂字段必须齐全（PRD 要求每次改完代码自检）

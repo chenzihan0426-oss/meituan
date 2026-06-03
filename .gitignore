@@ -7,3 +7,4 @@ llm_config.json
 plan_card*.html
 outbox/
 .amap_cache/
+.prefs.json
