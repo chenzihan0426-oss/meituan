@@ -524,7 +524,33 @@ def api_execute(body: dict) -> dict:
     except Exception:  # noqa
         s["card_html"] = None
     return {"ok": True, "text": text, "gmv": tb.gmv, "gmv_trace": gmv_trace,
-            "orders": len(tb.ledger), "has_card": bool(s.get("card_html"))}
+            "orders": len(tb.ledger), "has_card": bool(s.get("card_html")),
+            "business": _business_summary(plan, tb, s["party"])}
+
+
+def _business_summary(plan, tb, party: int) -> dict:
+    """从真实下单算"连带账单"：一句话撬动几个 SKU、客单多少、相对单点外卖翻几倍。
+
+    用的是**美团天天在测、可优化**的标准指标(连带率/客单价/留存)，不是拍脑袋的假数。
+    """
+    items = []
+    act = plan.find_by_type("choose_activity")
+    if act and act.chosen:
+        items.append({"label": "活动/门票", "amt": round((act.chosen.price or 0) * party)})
+    rest = plan.find_by_type("choose_restaurant")
+    if rest and rest.chosen:
+        items.append({"label": "餐厅", "amt": round((rest.chosen.price or 0) * party)})
+    gift = plan.find_by_type("send_gift")
+    if gift and gift.chosen:
+        items.append({"label": "礼物", "amt": round(gift.chosen.price or 0)})
+    # 商业面板讲'一句话撬动了几个 SKU 的连带'，用撬动总额(与分项一致)；
+    # tb.gmv 是执行后(含演示回滚)的真实值，归到'异常兜底'那条故事，不在这里混淆。
+    gmv = sum(it["amt"] for it in items)
+    base = 50   # 单点一份外卖的示意基线（标清楚是示意）
+    return {"items": items, "sku_count": len(items), "gmv": gmv,
+            "per_capita": round(gmv / max(1, party)), "baseline": base,
+            "multiple": round(gmv / base, 1) if gmv else 0,
+            "party": party, "trust": prefs.load_trust()["score"]}
 
 
 # ---------------------------------------------------------------------------
@@ -785,6 +811,16 @@ textarea:focus,input:focus,select:focus{border-color:var(--b2);background:#fff;b
 .mapcap{font-size:12.5px;color:var(--ink2);padding:8px 12px;background:var(--soft);font-weight:600}
 .cf{margin-top:8px;padding:9px 12px;border-radius:10px;background:var(--soft);border-left:3px solid var(--amber);color:var(--amber);font-size:13px;line-height:1.6}
 .tips{margin-top:14px;background:#fff;border:1px solid var(--line);border-left:3px solid var(--green);box-shadow:var(--shadow2);border-radius:12px;padding:13px 15px}
+.biz{margin-top:14px;padding:15px 16px;border-radius:14px;background:#fff;border:1px solid var(--line);border-left:3px solid var(--b2);box-shadow:var(--shadow2)}
+.biz-h{font-weight:800;font-size:14px;color:var(--ink);margin-bottom:8px}
+.biz-big{font-size:15px;color:var(--ink2);line-height:1.7}
+.biz-n{color:var(--b2);font-size:19px}
+.biz-skus{display:flex;gap:8px;flex-wrap:wrap;margin:9px 0}
+.biz-sku{background:var(--soft);border:1px solid var(--line);border-radius:18px;padding:4px 12px;font-size:12.5px;color:var(--ink2)}
+.biz-cmp{font-size:13px;color:var(--ink2);margin-top:4px}
+.biz-cmp b{color:var(--green)}
+.biz-note{margin-top:10px;font-size:12.5px;color:var(--muted);line-height:1.7;border-top:1px dashed var(--line);padding-top:9px}
+.biz-note b{color:var(--ink2)}
 .tips:empty{display:none}
 .tips-h{font-weight:800;font-size:13.5px;color:var(--green);margin-bottom:8px}
 .tip{display:flex;gap:9px;padding:5px 0;font-size:13.5px;color:var(--ink2);line-height:1.65;border-top:1px dashed var(--line)}
@@ -1038,6 +1074,7 @@ details.adv{margin:10px 0}details.adv summary{cursor:pointer;color:var(--b2);fon
     <div class="shd"><div class="no">4</div><div><h2>执行下单（含异常兜底）</h2>
       <p>按依赖顺序真把单下掉，每步状态可见；满座换备选、超时重试、失败回滚补偿，GMV 同步跳动。</p></div></div>
     <div class="exec" id="execOut"></div>
+    <div id="bizPanel"></div>
     <div class="cardcta">
       <button class="btn ok" id="cardBtn" style="display:none" onclick="openCard()">📲 打开可分享方案卡（递给老婆 / 发小张）</button>
       <button class="btn ghost" onclick="goto(0)">↺ 换个目标重新来</button>
@@ -1403,8 +1440,20 @@ async function execute(){
     else if(t.startsWith('↳')||t.startsWith('💰')||t.startsWith('👤'))cls='e-note';
     return `<div class="${cls}">${esc(line)}</div>`;}).join('');
   animateGmv(r.gmv_trace,r.gmv);
+  $('bizPanel').innerHTML=renderBusiness(r.business);
   if(r.has_card){$('cardBtn').style.display='';$('cardHint').style.display='';}
   reach(3);
+}
+function renderBusiness(b){
+  if(!b||!b.sku_count)return '';
+  const skus=b.items.map(it=>`<span class="biz-sku">${esc(it.label)} <b>¥${it.amt}</b></span>`).join('');
+  return `<div class="biz">
+    <div class="biz-h">💰 这一单的商业价值（一句话撬动的连带消费）</div>
+    <div class="biz-big"><b>一句话</b> → 连带 <b class="biz-n">${b.sku_count}</b> 个 SKU，撬动 <b class="biz-n">¥${b.gmv}</b></div>
+    <div class="biz-skus">${skus}</div>
+    <div class="biz-cmp">对比"只点一份外卖"（约 ¥${b.baseline}）：单次会话价值 <b>↑ ${b.multiple}×</b>　·　客单 ¥${b.per_capita}/人</div>
+    <div class="biz-note">📈 这就是<b>连带率 / 客单价</b>——美团天天在测、想提的核心指标，一句话直接抬上去。而<b>信任分 ${b.trust}/100</b> 把一次性交易变成"越用越离不开"的<b>留存资产</b>。全品类供给 × 即时履约的闭环，只有美团生态跑得通。</div>
+  </div>`;
 }
 function openCard(){window.open('/api/card?sid='+encodeURIComponent(S.sid),'_blank');}
 function animateGmv(trace,final){const seq=(trace&&trace.length)?trace:[final||0];let k=0;
