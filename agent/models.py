@@ -101,6 +101,8 @@ class Decision:
     counterfactual: str = ""
     # 信任账户'默认填'：根据历史预填的答案（仍是可改的提问，不锁死）
     prefill: str = ""
+    # 活动相对'吃饭'的时序：before（饭前）/ after（饭后）——支持'吃完饭再去唱K'这类顺序
+    when: str = "before"
 
     def __post_init__(self) -> None:
         # 自检：灵魂字段必须齐全（PRD 要求每次改完代码自检）

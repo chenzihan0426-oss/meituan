@@ -454,12 +454,16 @@ def _map_spots(s: dict) -> list:
     cons = s.get("constraints", {})
     ordered = [amap.search_center(cons)]
     plan = s["plan"]
-    for act in [d for d in plan.decisions if d.type.startswith("choose_activity") and d.chosen]:
-        if act.chosen.get("location"):
-            ordered.append(act.chosen.get("location"))
+    acts = [d for d in plan.decisions if d.type.startswith("choose_activity") and d.chosen]
     rest = plan.find_by_type("choose_restaurant")
+    for act in acts:                                   # 饭前活动
+        if getattr(act, "when", "before") != "after" and act.chosen.get("location"):
+            ordered.append(act.chosen.get("location"))
     if rest and rest.chosen and rest.chosen.get("location"):
         ordered.append(rest.chosen.get("location"))
+    for act in acts:                                   # 饭后活动（排在吃饭之后）
+        if getattr(act, "when", "before") == "after" and act.chosen.get("location"):
+            ordered.append(act.chosen.get("location"))
     return [(loc, str(i + 1)) for i, loc in enumerate(ordered)]   # 路线上标 1→2→3 顺序
 
 
@@ -543,7 +547,7 @@ def _replan_with_text(s: dict, text: str) -> list:
     """把一句自由要求识别成改活动/菜系/距离/预算/过敏/辣度，用会话的高德 ToolBox
     真正重搜重排。返回已执行的人话清单（空 = 没听出可执行偏好）。被 refine 与评审通道共用。"""
     from . import rules
-    from .intent import _scan_activity, all_activity_cats, ACTIVITY_PREF_LABEL, positive_cuisine
+    from .intent import _scan_activity, all_activity_cats, ACTIVITY_PREF, ACTIVITY_PREF_LABEL, positive_cuisine
     from .planner import _pick_activity, _opt_from_activity, _mk
     from .review import KNOWN_ALLERGENS
 
@@ -563,11 +567,20 @@ def _replan_with_text(s: dict, text: str) -> list:
                 lst.append(c["activity_pref"])
             elif c.get("activity_raw"):
                 lst.append("raw:" + c["activity_raw"])
+        whenmap = c.setdefault("activity_when", {})
+        low = text.lower()
+        # '饭后/吃完饭再'之后提到的活动算饭后；在它之前或没说的算饭前
+        _AFTER = ("吃完饭", "饭后", "餐后", "吃完再", "吃过饭", "吃了饭", "饭吃完", "吃饭后", "之后再", "再去")
+        marker = min((low.find(m) for m in _AFTER if m in low), default=-1)
         added = []
         for a in new_acts:
+            kws = [a[4:].lower()] if a.startswith("raw:") else ACTIVITY_PREF.get(a, [])
+            kwpos = min((low.find(k) for k in kws if k in low), default=10 ** 9)
+            whenmap[a] = "after" if (marker != -1 and kwpos > marker) else "before"
             if a not in lst:
                 lst.append(a)
-                added.append(a[4:] if a.startswith("raw:") else ACTIVITY_PREF_LABEL.get(a, a))
+                lab = a[4:] if a.startswith("raw:") else ACTIVITY_PREF_LABEL.get(a, a)
+                added.append(lab + ("（饭后）" if whenmap[a] == "after" else ""))
         c["activity_cats"] = lst
         if added:
             applied.append("活动加上：" + "、".join(added))
@@ -604,10 +617,11 @@ def _replan_with_text(s: dict, text: str) -> list:
     tb.context = {"goal": s["intent"].raw, "constraints": c}   # 让搜索用最新约束
     has_child = bool(c.get("need_child_friendly"))
 
-    if re_activity:                                       # 按 activity_cats 重建全部活动决定（多活动并存）
+    if re_activity:                                       # 按 activity_cats 重建全部活动决定（多活动并存 + 饭前/饭后）
         plan.decisions = [d for d in plan.decisions if not d.type.startswith("choose_activity")]
         insert_idx = next((i for i, d in enumerate(plan.decisions) if d.type == "choose_restaurant"), len(plan.decisions))
-        last_loc = last_label = None
+        whenmap = c.get("activity_when", {})
+        last_before_loc = last_before_label = None
         for n, item in enumerate(c.get("activity_cats", [])):
             if item.startswith("raw:"):
                 c.pop("activity_pref", None); c["activity_raw"] = item[4:]
@@ -620,14 +634,16 @@ def _replan_with_text(s: dict, text: str) -> list:
                 continue
             typ = "choose_activity" if n == 0 else f"choose_activity_{n + 1}"
             desc = "选活动" if n == 0 else f"选活动 #{n + 1}"
-            plan.decisions.insert(insert_idx, _mk(typ, desc, options=opts, chosen=chosen_act,
-                                                  confidence=conf, basis=basis, cost=Cost.LOW, reasoning=reason))
+            dec = _mk(typ, desc, options=opts, chosen=chosen_act,
+                      confidence=conf, basis=basis, cost=Cost.LOW, reasoning=reason)
+            dec.when = whenmap.get(item, "before")
+            plan.decisions.insert(insert_idx, dec)
             insert_idx += 1
-            if chosen_act is not None and chosen_act.get("location"):
-                last_loc, last_label = chosen_act.get("location"), chosen_act.label
+            if chosen_act is not None and chosen_act.get("location") and dec.when == "before":
+                last_before_loc, last_before_label = chosen_act.get("location"), chosen_act.label
         c.pop("activity_pref", None); c.pop("activity_raw", None)   # 临时键清掉，以 activity_cats 为准
-        if last_loc and not c.get("cuisine_pref"):       # 吃饭锚到最后一个活动
-            c["near_dining_loc"], c["near_dining_label"] = last_loc, last_label
+        if last_before_loc and not c.get("cuisine_pref"):   # 吃饭锚到'最后一个饭前活动'附近
+            c["near_dining_loc"], c["near_dining_label"] = last_before_loc, last_before_label
         re_restaurant = True
 
     if re_restaurant:                                     # 重搜餐厅（高德）
@@ -683,6 +699,9 @@ def api_execute(body: dict) -> dict:
     s["executed"] = True
     text = buf.getvalue()
     gmv_trace = [int(x) for x in re.findall(r"GMV ¥(\d+)", text)]
+    # 执行期可能改订了备选餐厅（满了→换备选），重建时间线，避免时间线与实际订到的店不一致
+    plan.timeline = _build_timeline(plan, constraints)
+    plan.tips = build_tips(plan, constraints)
     # 生成"递给老婆/发小张"的移动端可分享方案卡
     try:
         s["card_html"] = card.render_plan_card(
@@ -691,7 +710,7 @@ def api_execute(body: dict) -> dict:
         s["card_html"] = None
     return {"ok": True, "text": text, "gmv": tb.gmv, "gmv_trace": gmv_trace,
             "orders": len(tb.ledger), "has_card": bool(s.get("card_html")),
-            "business": _business_summary(plan, tb, s["party"])}
+            "business": _business_summary(plan, tb, s["party"]), "plan": _ser_plan(plan)}
 
 
 def _business_summary(plan, tb, party: int) -> dict:

@@ -269,6 +269,16 @@ class ToolBox:
         self._commit(txn)
         return {"ok": True, "ref": rest_id, "amount": amount, "txn": txn}
 
+    def book_activity(self, act_id: str, amount: float) -> dict:
+        """预订活动（KTV/游乐园/电影…门票或场次）。amount 由调用方按人数算好。"""
+        self._latency()
+        self._log("book_activity", act_id)
+        if self._maybe(f"timeout:book_activity", 0.0):
+            raise ToolError("timeout", "活动预订接口超时")
+        txn = {"action": "book_activity", "ref": act_id, "amount": amount}
+        self._commit(txn)
+        return {"ok": True, "ref": act_id, "amount": amount, "txn": txn}
+
     def join_queue(self, rest_id: str) -> dict:
         self._latency()
         self._log("join_queue", rest_id)

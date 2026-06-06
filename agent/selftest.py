@@ -88,7 +88,7 @@ def test_end_to_end():
     check(len(rest.confidence_history) >= 1, "置信度被'谁的反馈'更新过（PRD §3.1）")
     check(out["gmv"] > 0, f"GMV 计数器有累加（¥{out['gmv']:.0f}）")
     # 回滚演示：花单失败后退款，落地订单应为 2 笔（餐厅 + 展览票）
-    check(len(out["result"]["orders"]) == 2, "配送失败后回滚花单，落地订单=2（事务一致）")
+    check(len(out["result"]["orders"]) == 3, "配送失败回滚花单后，落地订单=3（活动+餐厅+展览票，事务一致）")
     check(any("退款" in n for n in out["result"]["notes"]), "执行记录里有回滚/补偿痕迹")
 
 
