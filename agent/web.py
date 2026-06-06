@@ -133,6 +133,7 @@ def _ser_dec(d):
         "status": d.status.value, "chosen": _ser_opt(d.chosen),
         "options": [_ser_opt(o) for o in d.options], "history": list(d.confidence_history),
         "counterfactual": getattr(d, "counterfactual", ""),
+        "prefill": getattr(d, "prefill", ""),
     }
 
 
@@ -173,25 +174,24 @@ def _apply_trust(plan, constraints: dict, party: int) -> dict:
     unlocked, budget_unlocked = [], False
     _UNLOCK = {"set_budget": ("budget_per_capita", lambda v: f"人均 {int(v)} 以内"),
                "set_return_time": ("return_time", lambda v: str(v))}
-    for d in plan.decisions:                       # ① 信任解锁：替你定你反复确认过的事
+    for d in plan.decisions:                       # ① 信任'默认填'：你反复确认过的，默认替你填好，但仍可改
         if d.type in _UNLOCK and confirms.get(d.type, 0) >= 2:
             key, fmt = _UNLOCK[d.type]
             val = saved.get(key)
             if val in (None, "", []):
                 continue
-            d.chosen = Option(label=fmt(val), kind="value")
-            d.status = Status.CONFIRMED
-            d.confidence = 0.9
-            d.confidence_basis = f"信任账户：你以前 {confirms[d.type]} 次都这么定"
-            d.disposition = Disposition.AUTO
-            d.reasoning = (f"🔓 这件事你以前确认过 {confirms[d.type]} 次（都按「{fmt(val)}」）——"
-                           f"信任够了，这次我替你定了，错了随时撤。")
+            label = fmt(val)
+            # 关键：不锁死。默认填上这个答案、方案先按它排，但保持'可改的提问'（不设 CONFIRMED/AUTO）
+            d.prefill = label
+            d.confidence_basis = f"信任账户：你以前 {confirms[d.type]} 次都这么定，已默认填上"
+            d.reasoning = (f"🔓 根据你以前 {confirms[d.type]} 次的习惯，已默认填「{label}」——"
+                           f"想改随时改，不改就按这个走。")
             if key == "budget_per_capita":
                 constraints["budget_per_capita"] = int(val)
                 budget_unlocked = True
             else:
                 constraints["return_time"] = val
-            unlocked.append({"type": d.type, "label": fmt(val)})
+            unlocked.append({"type": d.type, "label": label})
     if budget_unlocked:
         _reselect_restaurant(plan, constraints)
     for d in plan.decisions:                       # ② 其余按信任程度调处置
@@ -1085,6 +1085,7 @@ PAGE = r"""<!doctype html>
 
                     <div v-if="!isResolved(dec.status)" class="pl-14 mt-6">
                       <div v-if="dec.disposition === 'ask'" class="space-y-3">
+                        <div v-if="dec.prefill" class="inline-flex items-center gap-1.5 text-[12px] font-semibold text-indigo-600 bg-indigo-50 border border-indigo-100 rounded-lg px-3 py-1.5">🔓 已按你的习惯默认填「{{ dec.prefill }}」，想改点下面就行</div>
                         <div class="flex flex-wrap gap-2">
                           <button v-for="opt in askOptions(dec.type)" :key="opt" @click="pickAsk(dec.id, opt)"
                                   :class="['px-4 py-2.5 rounded-xl text-[14px] font-semibold border transition active:scale-95', answers[dec.id] === opt ? 'bg-rose-500 text-white border-rose-500 shadow-sm' : 'bg-white text-slate-600 border-slate-200 hover:border-rose-300']">
@@ -1458,8 +1459,14 @@ PAGE = r"""<!doctype html>
             refreshMap();
             gmv.value = r.plan.gmv_estimate || 0;
             memorySummary.value = (r.memory && r.memory.summary) || '';
-            answers.value = {}; suggestions.value = {};
-            planData.value.decisions.forEach(d => { if (d.disposition === 'suggest') suggestions.value[d.id] = true; });
+            answers.value = {}; suggestions.value = {}; customAsk.value = {};
+            planData.value.decisions.forEach(d => {
+              if (d.disposition === 'suggest') suggestions.value[d.id] = true;
+              if (d.disposition === 'ask' && d.prefill) {           // 信任默认填：预填上、可改
+                answers.value[d.id] = d.prefill;
+                if (!askOptions(d.type).includes(d.prefill)) customAsk.value[d.id] = true;
+              }
+            });
             reach(1);
             window.scrollTo({ top: 0, behavior: 'smooth' });
           } catch (e) { errorMsg.value = '服务异常：' + e; }
