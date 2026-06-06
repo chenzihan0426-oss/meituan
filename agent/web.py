@@ -176,6 +176,8 @@ def _apply_trust(plan, constraints: dict, party: int) -> dict:
                "set_return_time": ("return_time", lambda v: str(v))}
     for d in plan.decisions:                       # ① 信任'默认填'：你反复确认过的，默认替你填好，但仍可改
         if d.type in _UNLOCK and confirms.get(d.type, 0) >= 2:
+            if d.chosen is not None or d.status == Status.CONFIRMED:
+                continue                           # 这次你已经在目标里说明了，别用历史覆盖
             key, fmt = _UNLOCK[d.type]
             val = saved.get(key)
             if val in (None, "", []):
@@ -220,7 +222,8 @@ def api_start(body: dict) -> dict:
     loc = (body.get("loc") or "").strip()
     if loc:   # 用户实时定位 → 高德按真实位置搜附近
         intent.constraints["user_location"] = loc
-    if parse_with_llm and intent.flags.get("party_size"):
+    # 目标里明说了人数（'四个朋友'/'3人'）就以它为准，让人数与方案对应（不限是否用 LLM）
+    if intent.flags.get("party_size"):
         party = max(1, min(12, int(intent.flags["party_size"])))
     tb = ToolBox(seed=7, fast=True, use_llm=want_real,
                  forced=dict(INTERACTIVE_FORCED) if exceptions else {})
@@ -966,15 +969,20 @@ PAGE = r"""<!doctype html>
 
   <div id="app" v-cloak class="min-h-screen flex flex-col relative">
 
+    <!-- 重新规划时的全屏加载提示：让用户确信"要求已收到、正在处理" -->
+    <div v-if="isReviewing" class="fixed inset-0 z-[60] flex items-center justify-center bg-white/60 backdrop-blur-sm">
+      <div class="bg-white rounded-3xl shadow-premium border border-slate-100 px-9 py-8 flex flex-col items-center gap-4 mx-6">
+        <span class="w-10 h-10 border-[3px] border-rose-200 border-t-rose-500 rounded-full animate-spin"></span>
+        <div class="text-[16px] font-extrabold text-slate-800">✨ 已收到要求，正在重新规划…</div>
+        <div class="text-[13px] text-slate-400">用高德重搜重排，稍等一下</div>
+      </div>
+    </div>
+
     <header class="fixed top-0 w-full z-50 glass-nav transition-all duration-300">
       <div class="max-w-5xl mx-auto px-6 h-16 flex items-center justify-between">
         <div class="flex items-center gap-3">
           <div class="w-8 h-8 rounded-full bg-slate-900 text-white flex items-center justify-center text-sm font-black shadow-lg">AI</div>
           <span class="font-bold tracking-tight text-[15px]">Decision<span class="text-slate-400 font-normal">Mate</span></span>
-        </div>
-        <div class="hidden md:flex bg-slate-200/50 p-1 rounded-full border border-white/50 backdrop-blur-md">
-          <button @click="activeTab = 'I'" :class="['px-5 py-1.5 rounded-full text-[13px] font-semibold transition-all duration-300', activeTab === 'I' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-800']">交互模式</button>
-          <button @click="activeTab = 'D'" :class="['px-5 py-1.5 rounded-full text-[13px] font-semibold transition-all duration-300', activeTab === 'D' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-800']">演示验收</button>
         </div>
         <div class="flex items-center gap-5">
           <div v-if="trust" class="hidden sm:flex flex-col items-end justify-center" title="信任账户：你每确认它一次，它下次敢替你多定一点">
@@ -989,7 +997,7 @@ PAGE = r"""<!doctype html>
       </div>
     </header>
 
-    <main class="flex-1 w-full max-w-3xl mx-auto px-6 pt-32 pb-40 relative">
+    <main class="flex-1 w-full max-w-3xl mx-auto px-6 pt-32 pb-56 relative">
 
       <div v-show="activeTab === 'I'" class="relative">
 
@@ -1009,8 +1017,8 @@ PAGE = r"""<!doctype html>
                 <h1 class="text-4xl md:text-5xl font-extrabold tracking-tight text-slate-900 leading-[1.1] mb-6">
                   一句话，<br><span class="text-gradient-animated">把这一局安排明白。</span>
                 </h1>
-                <p class="text-slate-500 text-lg leading-relaxed max-w-xl font-light">
-                  一个<b class="font-semibold text-slate-700">拎得清</b>的 AI：能办的直接办，拿不准的给建议，<b class="font-semibold text-slate-700">只有它真不知道的才停下来问你</b>。绝不丢一堆链接让你自己挑。
+                <p class="text-slate-600 text-lg leading-relaxed max-w-xl font-bold">
+                  一个拎得清的 AI：能办的直接办，拿不准的给建议，只有它真不知道的才停下来问你。绝不丢一堆链接让你自己挑。
                 </p>
               </div>
 
@@ -1167,9 +1175,9 @@ PAGE = r"""<!doctype html>
               </div>
 
               <!-- 真实路线地图（高德实景，仅"真实地理数据"开启时出） -->
-              <div v-if="mapUrl" class="mt-8 bg-white rounded-3xl shadow-sm border border-slate-100 p-4">
+              <div v-if="mapUrl && !mapHidden" class="mt-8 bg-white rounded-3xl shadow-sm border border-slate-100 p-4">
                 <div class="text-[11px] font-bold text-slate-400 uppercase tracking-widest mb-3 px-2">🗺️ 真实路线（高德实景 · 家①→玩②→吃③，评委可当场搜证）</div>
-                <img :src="mapUrl" @error="mapUrl = ''" class="w-full rounded-2xl" alt="高德真实路线图">
+                <img :src="mapUrl" @error="mapHidden = true" class="w-full rounded-2xl" alt="高德真实路线图">
               </div>
 
               <div class="fixed bottom-8 left-1/2 -translate-x-1/2 w-[calc(100%-3rem)] max-w-3xl z-40 bg-slate-900/90 backdrop-blur-2xl rounded-3xl p-3 shadow-2xl border border-white/10 flex items-center justify-between">
@@ -1278,9 +1286,9 @@ PAGE = r"""<!doctype html>
               </div>
 
               <!-- 真实路线地图 -->
-              <div v-if="mapUrl" class="bg-white rounded-3xl shadow-sm border border-slate-100 p-4 mb-8">
+              <div v-if="mapUrl && !mapHidden" class="bg-white rounded-3xl shadow-sm border border-slate-100 p-4 mb-8">
                 <div class="text-[11px] font-bold text-slate-400 uppercase tracking-widest mb-3 px-2">🗺️ 真实路线（高德实景，可当场搜证）</div>
-                <img :src="mapUrl" @error="mapUrl = ''" class="w-full rounded-2xl" alt="高德真实路线图">
+                <img :src="mapUrl" @error="mapHidden = true" class="w-full rounded-2xl" alt="高德真实路线图">
               </div>
 
               <!-- 继续加要求（循环再生成）-->
@@ -1311,7 +1319,7 @@ PAGE = r"""<!doctype html>
             </div>
 
             <!-- 步骤 5: 执行 -->
-            <div v-else-if="currentStep === 4" class="absolute w-full top-0 left-0">
+            <div v-else-if="currentStep === 4" class="absolute w-full top-0 left-0 pb-28">
               <div class="mb-8">
                 <h2 class="text-3xl font-extrabold tracking-tight text-slate-900 mb-2">正在为你调度执行。</h2>
                 <p class="text-slate-500 text-[15px]">真实跑「查→订→买→送→发」闭环，含满座/超时重试/配送失败回滚补偿。</p>
@@ -1348,39 +1356,11 @@ PAGE = r"""<!doctype html>
         </div>
       </div>
 
-      <!-- ============ 演示验收模式（接真实 /api/run + /api/selftest）============ -->
-      <div v-show="activeTab === 'D'" class="mt-4">
-        <div class="mb-8">
-          <h2 class="text-3xl font-extrabold tracking-tight text-slate-900 mb-2">演示验收台</h2>
-          <p class="text-slate-500 text-[15px]">对照 PRD 9 条「必须演出来的瞬间」核验真实输出，外加 93 项内部逻辑自检。评委可当场点。</p>
-        </div>
-        <div class="flex flex-wrap gap-3 mb-6">
-          <button @click="runDemo('family')" :disabled="demoLoading" class="bg-slate-900 text-white font-bold px-6 py-3 rounded-xl hover:bg-rose-500 transition disabled:opacity-50">跑家庭场景</button>
-          <button @click="runDemo('friends')" :disabled="demoLoading" class="bg-white border border-slate-200 text-slate-700 font-bold px-6 py-3 rounded-xl hover:border-slate-300 transition disabled:opacity-50">跑朋友场景</button>
-          <button @click="runSelftest" :disabled="stLoading" class="bg-white border border-slate-200 text-slate-700 font-bold px-6 py-3 rounded-xl hover:border-slate-300 transition disabled:opacity-50">跑自检 93 项</button>
-          <span v-if="stResult" :class="['self-center font-bold text-sm', stResult.ok ? 'text-emerald-600' : 'text-rose-500']">{{ stResult.ok ? '✅' : '❌' }} 自检 {{ stResult.passed }}/{{ stResult.total }}</span>
-        </div>
-
-        <div v-if="demoLoading" class="text-slate-400 text-sm">跑真实 demo 中…（首次接真高德会稍慢）</div>
-
-        <div v-if="checklist.length" class="grid md:grid-cols-3 gap-3 mb-8">
-          <div v-for="c in checklist" :key="c.id" :class="['rounded-2xl border p-4', c.pass ? 'bg-emerald-50/50 border-emerald-100' : 'bg-rose-50/50 border-rose-100']">
-            <div class="flex items-center gap-2 mb-1"><span>{{ c.pass ? '✅' : '❌' }}</span><span class="text-[12px] font-bold text-slate-400">#{{ c.id }} · {{ c.scenario }}</span></div>
-            <div class="text-[13px] font-semibold text-slate-700 leading-snug">{{ c.title }}</div>
-            <div v-if="!c.pass" class="text-[11px] text-rose-400 mt-1">缺：{{ (c.missing||[]).join('、') }}</div>
-          </div>
-        </div>
-
-        <div v-if="demoText" class="rounded-[2rem] overflow-hidden shadow-2xl border border-slate-800 bg-slate-900/95 p-8">
-          <div class="font-mono text-[12px] leading-relaxed text-slate-300 max-h-[420px] overflow-y-auto no-scrollbar whitespace-pre-wrap">{{ demoText }}</div>
-        </div>
-      </div>
-
     </main>
   </div>
 
   <script>
-    const { createApp, ref, onMounted } = Vue;
+    const { createApp, ref, computed, watch, onMounted } = Vue;
     const post = async (url, body) => (await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) })).json();
     const get = async (url) => (await fetch(url)).json();
 
@@ -1397,12 +1377,6 @@ PAGE = r"""<!doctype html>
 
         const form = ref({ goal: '', partySize: 3, useLlm: true, exceptions: true });
         const realData = ref(false);
-        const mapUrl = ref('');
-        const mapNonce = ref(0);
-        const refreshMap = () => {
-          if (realData.value && sid.value) { mapNonce.value++; mapUrl.value = '/api/map?sid=' + encodeURIComponent(sid.value) + '&t=' + mapNonce.value; }
-          else mapUrl.value = '';
-        };
         const examples = ['今天下午带老婆孩子出去玩，别太远，老婆在减肥', '周末四个朋友小聚，想吃顿好的，有人无辣不欢'];
 
         // 真实定位
@@ -1437,6 +1411,14 @@ PAGE = r"""<!doctype html>
         const sid = ref('');
         const isAnalyzing = ref(false);
         const planData = ref(null);
+        // 地图 URL 绑定到方案版本号：方案一改 version 就变 → 图必然重取（不靠手动刷新）
+        const mapNonce = ref(0);
+        const mapHidden = ref(false);
+        const mapUrl = computed(() => (realData.value && sid.value && planData.value)
+          ? `/api/map?sid=${encodeURIComponent(sid.value)}&v=${planData.value.version || 0}&n=${mapNonce.value}`
+          : '');
+        watch(mapUrl, () => { mapHidden.value = false; });   // URL 一变就清"加载失败"标记，让新图能显示
+        const refreshMap = () => { mapNonce.value++; };       // 兜底：少数不改 version 的场景也强制刷新
         const answers = ref({});
         const suggestions = ref({});
         const isSubmittingAnswers = ref(false);
@@ -1453,13 +1435,6 @@ PAGE = r"""<!doctype html>
         const business = ref(null);
         const hasCard = ref(false);
 
-        // 演示验收
-        const demoLoading = ref(false);
-        const demoText = ref('');
-        const checklist = ref([]);
-        const stLoading = ref(false);
-        const stResult = ref(null);
-
         const restDecision = () => planData.value ? planData.value.decisions.find(d => d.type === 'choose_restaurant') : null;
         const candidates = () => { const r = restDecision(); return r && r.options ? r.options : []; };
 
@@ -1475,6 +1450,7 @@ PAGE = r"""<!doctype html>
             planData.value = r.plan;
             trust.value = r.trust;
             realData.value = !!r.llm_used;
+            if (r.party) form.value.partySize = r.party;   // 人数跟随目标里说的（如"四个朋友"→4）
             refreshMap();
             gmv.value = r.plan.gmv_estimate || 0;
             memorySummary.value = (r.memory && r.memory.summary) || '';
@@ -1525,6 +1501,7 @@ PAGE = r"""<!doctype html>
         const refine = async () => {
           const t = newConstraint.value.trim(); if (!t || isReviewing.value) return;
           isReviewing.value = true; errorMsg.value = '';
+          window.scrollTo({ top: 0, behavior: 'smooth' });   // 点击即回顶部 + 弹加载提示，让用户确信已收到
           try {
             const r = await post('/api/refine', { sid: sid.value, text: t });
             if (r.ok) {
@@ -1542,6 +1519,7 @@ PAGE = r"""<!doctype html>
           if (!edits.value.length) return;
           errorMsg.value = '';
           isReviewing.value = true;
+          window.scrollTo({ top: 0, behavior: 'smooth' });   // 点击即回顶部 + 弹加载提示
           try {
             const payload = edits.value.map(e => e.type === 'constraint'
               ? { author: e.author, weight: e.weight, type: 'constraint', constraint: e.constraint }
@@ -1586,17 +1564,6 @@ PAGE = r"""<!doctype html>
         };
 
         const openCard = () => window.open('/api/card?sid=' + encodeURIComponent(sid.value), '_blank');
-
-        // ---- 演示验收 ----
-        const runDemo = async (scenario) => {
-          demoLoading.value = true; demoText.value = '';
-          try {
-            const r = await get(`/api/run?scenario=${scenario}&conflict=suggestion`);
-            if (r.ok) { demoText.value = r.text; checklist.value = r.checklist || []; gmv.value = r.gmv || gmv.value; }
-          } catch (e) {}
-          demoLoading.value = false;
-        };
-        const runSelftest = async () => { stLoading.value = true; try { stResult.value = await get('/api/selftest'); } catch (e) {} stLoading.value = false; };
 
         // ---- 流程控制 ----
         const goto = (n) => { if (n <= maxReached.value) currentStep.value = n; };
@@ -1651,9 +1618,8 @@ PAGE = r"""<!doctype html>
           activeTab, currentStep, maxReached, steps, gmv, trust, errorMsg, memorySummary,
           loc, area, locOk, locStatus, addrInput, detectLoc, lockAddr,
           form, examples, sid, isAnalyzing, planData, answers, suggestions, isSubmittingAnswers,
-          shareUrl, copied, edits, newConstraint, isReviewing, reviewResult, isExecuting, execLogs, business, hasCard, mapUrl,
-          demoLoading, demoText, checklist, stLoading, stResult,
-          startPlan, forgetMe, submitAnswers, copyShare, wifeFar, friendUpscale, allergy, refine, regenerate, goExecute, openCard, resetFlow, runDemo, runSelftest,
+          shareUrl, copied, edits, newConstraint, isReviewing, reviewResult, isExecuting, execLogs, business, hasCard, mapUrl, mapHidden,
+          startPlan, forgetMe, submitAnswers, copyShare, wifeFar, friendUpscale, allergy, refine, regenerate, goExecute, openCard, resetFlow,
           goto, getIcon, countDispo, countDispoAll, isResolved, getCardStyle, getIconBg, getMinimalBadge,
           askOptions, customAsk, pickAsk, pickCustom, unansweredAsks
         };
@@ -1668,82 +1634,171 @@ PAGE = r"""<!doctype html>
 # 朋友页：通过分享链接打开，看到攒局人的方案、提交自己的一条改动
 # ===========================================================================
 JOIN_PAGE = r"""<!doctype html>
-<html lang="zh-CN"><head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>帮朋友改改这个安排</title>
-<style>
-:root{--b1:#ff8a52;--b2:#ff5d87;--grad:linear-gradient(135deg,#ff8a52,#ff5d87);
- --ink:#1b2030;--ink2:#444b60;--muted:#8a90a4;--line:#e9ebf3;--soft:#f5f6fb;--green:#12a05a;--greenbg:#e6f7ee}
-*{box-sizing:border-box;margin:0;padding:0}
-body{background:#f3f4f9;color:var(--ink);font:15px/1.6 -apple-system,"PingFang SC",system-ui,sans-serif;padding:16px}
-.wrap{max-width:560px;margin:0 auto}
-.hd{background:var(--grad);color:#fff;border-radius:16px;padding:18px 20px;margin-bottom:14px}
-.hd h1{font-size:18px}.hd p{font-size:13px;opacity:.92;margin-top:4px}
-.card{background:#fff;border:1px solid var(--line);border-radius:14px;padding:16px;margin-bottom:14px}
-.card h2{font-size:14px;color:var(--ink2);margin-bottom:10px}
-.cur{font-size:13.5px;color:var(--ink2)}.cur b{color:var(--ink)}
-.tl{margin-top:10px;background:var(--soft);border-radius:10px;padding:10px 12px;font-size:13px}
-.tl .r{display:flex;gap:10px;padding:3px 0}.tl .t{color:var(--b2);font-weight:700;min-width:100px}
-label{display:block;font-size:13px;color:var(--ink2);margin:10px 0 4px}
-input,select{width:100%;border:1px solid var(--line);border-radius:9px;padding:9px 11px;font-size:14px}
-.row{display:flex;gap:10px}.row>*{flex:1}
-.btn{background:var(--grad);color:#fff;border:none;border-radius:10px;padding:12px;font-size:15px;font-weight:700;width:100%;margin-top:14px;cursor:pointer}
-.seg{display:flex;gap:8px;margin-top:6px}
-.seg button{flex:1;border:1px solid var(--line);background:#fff;border-radius:9px;padding:8px;cursor:pointer;font-size:13.5px}
-.seg button.on{border-color:var(--b2);color:var(--b2);font-weight:700}
-.ok{background:var(--greenbg);color:var(--green);border-radius:10px;padding:12px;font-weight:700;margin-top:12px}
-.hidden{display:none}.muted{color:var(--muted);font-size:12.5px}
-</style></head>
-<body><div class="wrap">
-  <div class="hd"><h1>🙋 帮朋友改改这个安排</h1><p id="goal">加载中…</p></div>
-  <div class="card"><h2>当前方案</h2><div class="cur" id="cur"></div><div class="tl" id="tl"></div></div>
-  <div class="card">
-    <h2>你想改什么？</h2>
-    <div class="seg" id="seg">
-      <button class="on" data-t="restaurant" onclick="segPick(this)">换个餐厅</button>
-      <button data-t="constraint" onclick="segPick(this)">加个要求</button>
-    </div>
-    <label>你的名字</label><input id="who" placeholder="如：小张">
-    <div id="restBox"><label>换成哪家（按离攒局人位置远近列出）</label><select id="rest"></select></div>
-    <div id="consBox" class="hidden"><label>你的要求</label><input id="cons" placeholder="如：我对海鲜过敏 / 想吃辣的"></div>
-    <label>附言（可选）</label><input id="note" placeholder="如：那家有点远">
-    <button class="btn" onclick="submit()">提交我的改动</button>
-    <div id="done" class="ok hidden"></div>
-    <div class="muted" style="margin-top:8px">提交后，攒局人会在 ta 那边收到你的改动，由 ta 拍板合并。你可以提交多条。</div>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>帮朋友改改这个安排</title>
+  <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: { sans: ['"Inter"', '-apple-system', 'BlinkMacSystemFont', '"PingFang SC"', 'sans-serif'] },
+          boxShadow: { 'premium': '0 10px 40px -10px rgba(0,0,0,0.08), 0 1px 3px rgba(0,0,0,0.03)' }
+        }
+      }
+    }
+  </script>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap');
+    html { -webkit-text-size-adjust: 100%; }
+    body { background-color: #f8fafc; -webkit-font-smoothing: antialiased; }
+    @keyframes fadeInUp { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+    .animate-fade-in { animation: fadeInUp 0.4s cubic-bezier(0.16, 1, 0.3, 1) forwards; }
+  </style>
+</head>
+
+<body class="text-slate-800 relative min-h-screen">
+
+  <div class="fixed inset-0 overflow-hidden pointer-events-none -z-10">
+    <div class="absolute top-[-10%] right-[-10%] w-80 h-80 bg-rose-200/40 rounded-full mix-blend-multiply filter blur-[70px]"></div>
+    <div class="absolute bottom-[-20%] left-[-10%] w-96 h-96 bg-orange-200/30 rounded-full mix-blend-multiply filter blur-[80px]"></div>
   </div>
-</div>
-<script>
-const $=id=>document.getElementById(id);
-const SID=new URLSearchParams(location.search).get('sid')||'';
-let TYPE='restaurant',CANDS=[];
-function segPick(b){document.querySelectorAll('#seg button').forEach(x=>x.classList.remove('on'));b.classList.add('on');
-  TYPE=b.dataset.t;$('restBox').classList.toggle('hidden',TYPE!=='restaurant');$('consBox').classList.toggle('hidden',TYPE!=='constraint');}
-function esc(s){return (s==null?'':String(s)).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
-function facts(o){let b=[];if(o.per_capita!=null)b.push('人均'+Math.round(o.per_capita));if(o.distance_km!=null)b.push(o.distance_km+'km');return b.length?'（'+b.join('，')+'）':'';}
-async function load(){
-  if(!SID){$('goal').textContent='链接无效';return;}
-  const r=await(await fetch('/api/plan?sid='+encodeURIComponent(SID))).json();
-  if(!r.ok){$('goal').textContent=r.error||'链接已过期';return;}
-  $('goal').textContent='“'+r.goal+'”　·　'+r.party+' 人';
-  const chosen=r.plan.decisions.filter(d=>d.chosen).map(d=>'<b>'+esc(d.chosen.label)+'</b>').join('　·　');
-  $('cur').innerHTML=chosen||'（暂无）';
-  $('tl').innerHTML=(r.plan.timeline||[]).map(s=>`<div class="r"><span class="t">${esc(s.start)}${s.end&&s.end!==s.start?'–'+esc(s.end):''}</span><span>${esc(s.title)}</span></div>`).join('');
-  CANDS=r.candidates||[];
-  $('rest').innerHTML=CANDS.map(o=>`<option value="${esc(o.id)}">${esc(o.label)}${facts(o)}</option>`).join('');
-}
-async function submit(){
-  const who=$('who').value.trim();if(!who){alert('先填你的名字');return;}
-  const body={sid:SID,author:who,weight:0.5,type:TYPE,note:$('note').value.trim()};
-  if(TYPE==='constraint'){body.constraint=$('cons').value.trim();if(!body.constraint){alert('填一下你的要求');return;}}
-  else{body.after_id=$('rest').value;}
-  const r=await(await fetch('/api/submit_edit',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})).json();
-  if(!r.ok){alert(r.error);return;}
-  $('done').textContent='✅ 已提交：'+r.label+'（攒局人会收到，目前共 '+r.received+' 条）';
-  $('done').classList.remove('hidden');$('cons').value='';$('note').value='';
-}
-load();
-</script>
-</body></html>
+
+  <div id="app" class="w-full max-w-xl mx-auto px-6 py-12 pb-16">
+
+    <div class="mb-9 mt-2 text-center">
+      <div class="inline-flex items-center justify-center w-[68px] h-[68px] rounded-[1.4rem] bg-gradient-to-br from-orange-400 to-rose-500 text-white text-[32px] shadow-lg shadow-rose-200 mb-5">🙋</div>
+      <h1 class="text-[30px] font-black tracking-tight text-slate-900 mb-3 leading-tight">帮朋友改改这个安排</h1>
+      <p class="text-[17px] text-slate-500 font-medium px-2 leading-relaxed">
+        “{{ goal }}”
+        <span v-if="party" class="text-[12px] uppercase tracking-widest text-slate-400 font-bold mt-2.5 block">· {{ party }} 人同行 ·</span>
+      </p>
+    </div>
+
+    <div class="bg-white/80 backdrop-blur-xl border border-white/60 rounded-[2rem] p-7 shadow-premium mb-6">
+      <h2 class="text-[12px] font-bold text-slate-400 uppercase tracking-widest mb-5">当前暂定方案</h2>
+      <div class="text-[18px] font-bold text-slate-800 mb-7 leading-relaxed" v-html="chosenPlan"></div>
+
+      <div class="space-y-0">
+        <div v-for="(item, idx) in timeline" :key="idx" class="flex gap-4">
+          <div class="w-[88px] shrink-0 text-right font-mono font-bold text-[15px] text-rose-500 pt-0.5 tracking-tight">{{ item.start }}</div>
+          <div class="flex-1 border-l-2 border-slate-100 pl-5 pb-5">
+            <div class="text-[16px] font-semibold text-slate-700">{{ item.title }}</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="bg-white/80 backdrop-blur-xl border border-white/60 rounded-[2rem] p-7 shadow-premium mb-4">
+      <h2 class="text-[12px] font-bold text-slate-400 uppercase tracking-widest mb-5">你想改什么？</h2>
+
+      <div class="flex bg-slate-100/80 p-1.5 rounded-2xl mb-7 border border-slate-200/50">
+        <button @click="editType = 'restaurant'" :class="['flex-1 py-3 rounded-xl text-[15px] font-bold transition-all duration-300', editType === 'restaurant' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-700']">换个餐厅</button>
+        <button @click="editType = 'constraint'" :class="['flex-1 py-3 rounded-xl text-[15px] font-bold transition-all duration-300', editType === 'constraint' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-700']">加个要求</button>
+      </div>
+
+      <div class="space-y-5">
+        <div>
+          <label class="block text-[13px] font-bold text-slate-500 mb-2 ml-1">你的名字</label>
+          <input v-model="form.author" class="w-full bg-slate-50/50 border-2 border-slate-200 focus:border-rose-400 focus:bg-white rounded-[1.25rem] px-4 py-4 text-[16px] outline-none transition-all shadow-inner placeholder-slate-400 font-medium" placeholder="如：小张">
+        </div>
+        <div v-if="editType === 'restaurant'">
+          <label class="block text-[13px] font-bold text-slate-500 mb-2 ml-1">换成哪家</label>
+          <select v-model="form.restaurantId" class="w-full bg-slate-50/50 border-2 border-slate-200 focus:border-rose-400 focus:bg-white rounded-[1.25rem] px-4 py-4 text-[16px] outline-none transition-all shadow-inner text-slate-700 font-medium appearance-none">
+            <option v-for="cand in candidates" :key="cand.id" :value="cand.id">{{ cand.label }} {{ formatFacts(cand) }}</option>
+          </select>
+        </div>
+        <div v-if="editType === 'constraint'">
+          <label class="block text-[13px] font-bold text-slate-500 mb-2 ml-1">你的要求</label>
+          <input v-model="form.constraint" class="w-full bg-slate-50/50 border-2 border-slate-200 focus:border-rose-400 focus:bg-white rounded-[1.25rem] px-4 py-4 text-[16px] outline-none transition-all shadow-inner placeholder-slate-400 font-medium" placeholder="如：我对海鲜过敏 / 想吃辣的">
+        </div>
+        <div>
+          <label class="block text-[13px] font-bold text-slate-500 mb-2 ml-1">附言（可选）</label>
+          <input v-model="form.note" class="w-full bg-slate-50/50 border-2 border-slate-200 focus:border-rose-400 focus:bg-white rounded-[1.25rem] px-4 py-4 text-[16px] outline-none transition-all shadow-inner placeholder-slate-400 font-medium" placeholder="如：那家有点远">
+        </div>
+      </div>
+
+      <button @click="submit" :disabled="isSubmitting" class="w-full mt-8 bg-slate-900 text-white font-black text-[17px] py-[18px] rounded-2xl shadow-[0_10px_25px_-5px_rgba(15,23,42,0.3)] hover:-translate-y-0.5 active:scale-[0.98] transition-all disabled:opacity-50 disabled:hover:transform-none flex items-center justify-center gap-2">
+        <span v-if="isSubmitting" class="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin"></span>
+        {{ isSubmitting ? '正在提交...' : '提交我的改动' }}
+      </button>
+
+      <div v-if="successMsg" class="mt-5 bg-emerald-50/80 border border-emerald-100 text-emerald-600 p-4 rounded-2xl text-[14px] font-bold animate-fade-in shadow-sm flex items-start gap-2">
+        <span>✅</span><span class="leading-relaxed">{{ successMsg }}</span>
+      </div>
+
+      <p class="text-[13px] text-slate-400 mt-6 leading-relaxed font-medium text-center px-2">
+        提交后，攒局人会在 ta 的设备上收到改动，并交由 AI 合并。<br>你可以连续提交多条。
+      </p>
+    </div>
+  </div>
+
+  <script>
+    const { createApp, ref, onMounted } = Vue;
+    const esc = s => (s == null ? '' : String(s)).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+    createApp({
+      setup() {
+        const SID = new URLSearchParams(location.search).get('sid') || '';
+        const goal = ref('加载中...');
+        const party = ref(0);
+        const chosenPlan = ref('<span class="text-slate-400">（暂无）</span>');
+        const timeline = ref([]);
+        const candidates = ref([]);
+        const editType = ref('restaurant');
+        const isSubmitting = ref(false);
+        const successMsg = ref('');
+        const form = ref({ author: '', restaurantId: '', constraint: '', note: '' });
+
+        const formatFacts = (o) => {
+          let b = [];
+          if (o.per_capita != null) b.push('人均¥' + Math.round(o.per_capita));
+          if (o.distance_km != null) b.push(o.distance_km + 'km');
+          return b.length ? `（${b.join('，')}）` : '';
+        };
+
+        const loadData = async () => {
+          if (!SID) { goal.value = '链接无效'; return; }
+          try {
+            const r = await (await fetch('/api/plan?sid=' + encodeURIComponent(SID))).json();
+            if (!r.ok) { goal.value = r.error || '链接已过期'; return; }
+            goal.value = r.goal;
+            party.value = r.party;
+            const chosen = (r.plan.decisions || []).filter(d => d.chosen)
+              .map(d => `<span class="text-slate-800">${esc(d.chosen.label)}</span>`).join('　·　');
+            chosenPlan.value = chosen || '<span class="text-slate-400">（暂无）</span>';
+            timeline.value = (r.plan.timeline || []).map(s => ({ start: s.start, end: s.end, title: s.title }));
+            candidates.value = r.candidates || [];
+            if (candidates.value.length) form.value.restaurantId = candidates.value[0].id;
+          } catch (e) { goal.value = '加载失败：' + e; }
+        };
+
+        const submit = async () => {
+          if (!form.value.author.trim()) return alert('先填你的名字');
+          if (editType.value === 'constraint' && !form.value.constraint.trim()) return alert('填一下你的要求');
+          isSubmitting.value = true; successMsg.value = '';
+          try {
+            const body = { sid: SID, author: form.value.author.trim(), weight: 0.5, type: editType.value, note: form.value.note.trim() };
+            if (editType.value === 'constraint') body.constraint = form.value.constraint.trim();
+            else body.after_id = form.value.restaurantId;
+            const r = await (await fetch('/api/submit_edit', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })).json();
+            if (!r.ok) { alert(r.error); isSubmitting.value = false; return; }
+            successMsg.value = '已提交：' + r.label + '（攒局人会收到，目前共 ' + r.received + ' 条）';
+            form.value.constraint = ''; form.value.note = '';
+          } catch (e) { alert('' + e); }
+          isSubmitting.value = false;
+        };
+
+        onMounted(loadData);
+        return { goal, party, chosenPlan, timeline, candidates, editType, form, isSubmitting, successMsg, formatFacts, submit };
+      }
+    }).mount('#app');
+  </script>
+</body>
+</html>
 """
 
 if __name__ == "__main__":

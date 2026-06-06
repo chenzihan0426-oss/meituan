@@ -21,6 +21,7 @@ from . import llm  # 复用配置加载 + SSL 上下文
 _AROUND = "https://restapi.amap.com/v5/place/around"
 _REGEO = "https://restapi.amap.com/v3/geocode/regeo"     # 逆地理：坐标 → 地名
 _GEOCODE = "https://restapi.amap.com/v3/geocode/geo"     # 正向：地址 → 坐标
+_TEXT = "https://restapi.amap.com/v5/place/text"          # POI 关键词搜索（地标/商场名）
 _WEATHER = "https://restapi.amap.com/v3/weather/weatherInfo"  # 实时天气
 _STATIC = "https://restapi.amap.com/v3/staticmap"             # 静态地图（返回 PNG）
 CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".amap_cache")
@@ -161,17 +162,37 @@ def regeo(loc: str) -> str:
     return "".join(p for p in parts if isinstance(p, str)) or "你的位置"
 
 
-def geocode(address: str, city: str = "北京") -> str | None:
-    """正向编码：地址/地名 → 'lng,lat'(GCJ-02)。查不到返回 None。
+def geocode(address: str, city: str = "") -> str | None:
+    """地名/地标 → 'lng,lat'(GCJ-02)。查不到返回 None。
 
-    带 city 约束避免重名地点跨城误匹配（如'五道口'），默认按'家'所在的北京。
+    优先用 POI 关键词搜索（全国范围）：地标/商场名（万象天地/益田假日里…）都能命中，
+    且不锁死城市——避免'地理编码 + 写死北京'导致非北京地名报 30001。
+    查不到再回退正向地理编码。city 非空时按该城市优先（消歧）。
     """
-    if not address.strip():
+    addr = address.strip()
+    if not addr:
         return None
-    data = _api(_GEOCODE, {"address": address.strip(), "city": city})
-    geos = data.get("geocodes") or []
-    if geos and geos[0].get("location"):
-        return geos[0]["location"]
+    # 1) POI 关键词搜索（地标/商场名最稳，全国可达）
+    try:
+        params = {"keywords": addr, "page_size": 1, "page_num": 1}
+        if city:
+            params["region"] = city
+            params["city_limit"] = "true"
+        pois = _api(_TEXT, params).get("pois") or []
+        if pois and pois[0].get("location"):
+            return pois[0]["location"]
+    except Exception:
+        pass
+    # 2) 回退正向地理编码（不再锁死城市）
+    try:
+        p = {"address": addr}
+        if city:
+            p["city"] = city
+        geos = _api(_GEOCODE, p).get("geocodes") or []
+        if geos and geos[0].get("location"):
+            return geos[0]["location"]
+    except Exception:
+        pass
     return None
 
 
@@ -358,11 +379,14 @@ def amap_restaurants(goal: str, constraints: dict, n: int = 10) -> list[dict]:
         loc = search_center(constraints)
         radius = int((constraints.get("max_distance_km") or 10) * 1000)
         radius = max(3000, min(50000, radius))
+    raw_kw = constraints.get("cuisine_raw")
     if pref and pref in CUISINE_TYPECODE:
         types = CUISINE_TYPECODE[pref]   # 用精确 typecode 严格搜该口味
         kw = pref
     elif pref:
         types, kw = "050000", pref
+    elif raw_kw:
+        types, kw = "050000", raw_kw     # 用户原话（如'啤酒/大排档'）作关键词搜
     elif constraints.get("need_low_cal"):
         types, kw = _MEAL_TYPES, "轻食 简餐"
     elif constraints.get("need_child_friendly"):

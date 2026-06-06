@@ -74,6 +74,57 @@ CUISINE_PREF = {
 _CUISINE_NEG = ("不", "别", "忌", "讨厌", "没", "少", "戒", "怕")
 
 
+_CN_NUM = {"两": 2, "俩": 2, "仨": 3, "一": 1, "二": 2, "三": 3, "四": 4,
+           "五": 5, "六": 6, "七": 7, "八": 8, "九": 9, "十": 10}
+
+
+def _cn2int(s: str):
+    if s in _CN_NUM:
+        return _CN_NUM[s]
+    if s == "十":
+        return 10
+    if len(s) == 2 and s[0] == "十":
+        return 10 + _CN_NUM.get(s[1], 0)
+    if len(s) == 2 and s[1] == "十":
+        return _CN_NUM.get(s[0], 0) * 10
+    return None
+
+
+def _parse_party(text: str):
+    """从'四个朋友/3人/俩人/一家三口'里数出人数（1~12）。数不出返回 None。"""
+    m = re.search(r"(\d{1,2})\s*(?:个人|人|位|个朋友|口)", text)
+    if m:
+        n = int(m.group(1))
+        return n if 1 <= n <= 12 else None
+    m = re.search(r"(两|俩|仨|[一二三四五六七八九十]{1,3})\s*(?:个人|个朋友|个|人|位|口)", text)
+    if m:
+        n = _cn2int(m.group(1))
+        return n if n and 1 <= n <= 12 else None
+    return None
+
+
+def parse_budget(text: str):
+    """从'人均120/预算200/200块以内'提取人均预算（数字）；没提到返回 None。"""
+    m = re.search(r"(?:人均|预算|每人|人手|花费|消费)\D{0,4}(\d{2,4})", text)
+    if not m:
+        m = re.search(r"(\d{2,4})\s*(?:块|元)", text)
+    if m:
+        n = int(m.group(1))
+        return n if 20 <= n <= 2000 else None
+    return None
+
+
+_RET_CTX = ("到家", "回家", "散场", "回去", "结束", "玩到", "之前回", "点回", "点前")
+
+
+def parse_return_time(text: str):
+    """用户说了'X点前到家/晚上9点回家/玩到10点'就提取出来；没提到返回 None。"""
+    if not any(k in text for k in _RET_CTX):
+        return None
+    m = re.search(r"((?:上午|中午|下午|晚上|傍晚|夜里|晚)?\s*\d{1,2}\s*(?:点半|点|[:：]\d{2}))", text)
+    return m.group(1).strip() if m else None
+
+
 def positive_cuisine(text: str):
     """从文本里识别'正向想吃的菜系'，跳过否定语境。返回 cui 或 None。
 
@@ -125,6 +176,29 @@ def parse_goal(text: str, use_llm: bool = False) -> Intent:
                 elif raw:
                     it.constraints.setdefault("activity_raw", raw)
                     it.flags["wants_activity"] = True
+            # LLM 没数对人数 / 没听出'海边·啤酒'这类场景时，用关键词补上（两条路径一致）
+            if not it.flags.get("party_size"):
+                pn = _parse_party(text)
+                if pn:
+                    it.flags["party_size"] = pn
+            if not it.constraints.get("activity_pref") and not it.constraints.get("activity_raw") \
+                    and any(k in text for k in ("海边", "海风", "看海", "海滩", "海景", "吹海风")):
+                it.constraints["activity_raw"] = "海边"
+                it.flags["wants_activity"] = True
+            for kw in ("啤酒", "大排档", "夜宵", "酒馆", "小酒馆"):   # 明说的场景词，用户意图明确，直接覆盖
+                if kw in text:
+                    it.constraints["cuisine_raw"] = kw
+                    it.constraints.pop("cuisine_pref", None)
+                    break
+            # 用户已给的字段就别再追问：预算 / 到家时间（LLM 没给则关键词补）
+            if not it.constraints.get("budget_per_capita"):
+                b = parse_budget(text)
+                if b:
+                    it.constraints["budget_per_capita"] = b
+            if not it.constraints.get("return_time"):
+                rt = parse_return_time(text)
+                if rt:
+                    it.constraints["return_time"] = rt
             return it
         except Exception:
             pass   # 回退规则解析（PRD §8：AI 不灵也优雅）
@@ -132,6 +206,11 @@ def parse_goal(text: str, use_llm: bool = False) -> Intent:
     t = text
     intent = Intent(raw=text)
     c = intent.constraints
+
+    # --- 人数：从话里数出来（'四个朋友''3人''俩人'），让人数跟目标对应 ---
+    n = _parse_party(t)
+    if n:
+        intent.flags["party_size"] = n
 
     # --- 同行人 ---
     if any(k in t for k in ("老婆", "妻子", "媳妇", "爱人")):
@@ -181,8 +260,20 @@ def parse_goal(text: str, use_llm: bool = False) -> Intent:
         intent.flags["wants_activity"] = True
         intent.known.append(f"想去的场所：{raw}（按你的原话搜附近）")
 
+    # --- 场景词：'吹海风/看海'→去海边；'喝啤酒/大排档/夜宵'→按这关键词搜店 ---
+    if "activity_raw" not in c and not c.get("activity_pref") \
+            and any(k in t for k in ("海边", "海风", "看海", "海滩", "海景", "吹海风")):
+        c["activity_raw"] = "海边"
+        intent.flags["wants_activity"] = True
+        intent.known.append("想去海边吹风（按'海边'搜附近）")
+    for kw in ("啤酒", "大排档", "夜宵", "酒馆", "小酒馆", "海鲜大排档"):
+        if kw in t and "cuisine_pref" not in c:
+            c["cuisine_raw"] = kw
+            intent.known.append(f"想要「{kw}」的氛围（按此搜店）")
+            break
+
     # --- 是否要安排'活动'（出去玩）还是单纯吃饭 ---
-    if any(k in t for k in ("玩", "出去", "出门", "逛", "活动", "景点", "游")):
+    if any(k in t for k in ("玩", "出去", "出门", "逛", "活动", "景点", "游", "海边")):
         intent.flags["wants_activity"] = True
 
     # --- 你想吃的'菜系/口味'（据此选店；'不吃X/X过敏'不算想吃）---
@@ -190,20 +281,26 @@ def parse_goal(text: str, use_llm: bool = False) -> Intent:
     if cui:
         c["cuisine_pref"] = cui
         intent.known.append(f"想吃的口味：{cui}（按此优先选店）")
-    # 没命中已知菜系，但明确说了"想吃X"——也别装没听见，记下来好诚实回应
-    if "cuisine_pref" not in c:
-        m = re.search(r"(?:想吃|要吃|爱吃|来点|整点|想整点|馋)([一-龥]{2,4})", t)
+    # 没命中已知菜系，但明确说了"想吃/想喝X"——也别装没听见，记下来好诚实回应
+    if "cuisine_pref" not in c and "cuisine_raw" not in c:
+        m = re.search(r"(?:想吃|要吃|爱吃|想喝|要喝|来点|整点|想整点|馋)([一-龥]{2,4})", t)
         if m and not any(ch in m.group(1) for ch in "的地个点家饭顿啥东西好喝"):
             c["cuisine_raw"] = m.group(1)
 
-    # --- 显式列出'未知'（绝不默默填默认值）---
-    if "预算" not in t and "人均" not in t:
+    # --- 用户已给的字段就别再追问：提取预算 / 到家时间 ---
+    b = parse_budget(t)
+    if b:
+        c["budget_per_capita"] = b
+        intent.known.append(f"预算：人均 {b} 左右（你已说明）")
+    rt = parse_return_time(t)
+    if rt:
+        c["return_time"] = rt
+        intent.known.append(f"到家时间：{rt}（你已说明）")
+
+    # --- 只把'必要且缺失'的列入未知（非必要不追问）---
+    if not c.get("budget_per_capita"):
         intent.unknown.append("预算 / 餐厅消费档位？（完全未知，问错代价高）")
-    if "忌口" not in t and "过敏" not in t:
-        intent.unknown.append("孩子忌口 / 吃不吃辣？（影响选店）")
-    if intent.flags.get("emotional_diet"):
-        intent.unknown.append("老婆减肥忌口到什么程度？（是否完全戒糖）")
-    if not any(k in t for k in ("几点", "到家", "回家")):
+    if not c.get("return_time"):
         intent.unknown.append("几点必须到家 / 散场？（影响整条时间线，错了全盘崩）")
 
     # --- 礼物意图（攒局通常想给个惊喜）---
