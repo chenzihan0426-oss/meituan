@@ -346,24 +346,31 @@ def _build_timeline(plan: Plan, c: dict) -> list[Slot]:
 
     # 倒排：从'到家时刻'往前推每个环节，让整条线真正卡在你定的时间结束。
     # 通勤段按真实距离估车程，落在早晚高峰再加堵车 buffer。
+    before = [a for a in acts if getattr(a, "when", "before") != "after"]   # 饭前 / 饭后活动
+    after = [a for a in acts if getattr(a, "when", "before") == "after"]
+
+    def _add_activity(act, lead):
+        ad = _dist_of(act)
+        blocks.append({"dur": _travel_minutes(ad), "title": lead,
+                       "note": f"约 {ad}km", "travel": True})
+        adur = int(round(float(act.chosen.get("duration_h", 2.0) or 2.0) * 60))
+        blocks.append({"dur": adur, "title": act.chosen.label,
+                       "note": act.reasoning.split("；")[0]})
+
     blocks = []   # {dur, title, note, travel}
     if nap and nap.chosen:
         blocks.append({"dur": 40, "title": "孩子午睡口子",
                        "note": "5 岁娃下午易困，先补觉（建议项，待您定）"})
-    for n, act in enumerate(acts):
-        ad = _dist_of(act)
-        blocks.append({"dur": _travel_minutes(ad),
-                       "title": "出发去玩" if n == 0 else "前往下一站",
-                       "note": (f"离家约 {ad}km" if n == 0 else f"约 {ad}km，顺路下一站"), "travel": True})
-        adur = int(round(float(act.chosen.get("duration_h", 2.0) or 2.0) * 60))
-        blocks.append({"dur": adur, "title": act.chosen.label,
-                       "note": act.reasoning.split("；")[0]})
-    if acts:
+    for n, act in enumerate(before):                       # 饭前活动
+        _add_activity(act, "出发去玩" if n == 0 else "前往下一站")
+    if before and rest and rest.chosen:
         blocks.append({"dur": _travel_minutes(_dist_of(rest)), "title": "前往餐厅",
                        "note": "顺路过去", "travel": True})
     if rest and rest.chosen:
         blocks.append({"dur": 90, "title": f"用餐 @ {rest.chosen.label}",
                        "note": rest.reasoning.split("；")[0]})
+    for n, act in enumerate(after):                        # 饭后活动（吃完再去）
+        _add_activity(act, "饭后出发" if n == 0 else "前往下一站")
     if gift and gift.chosen:
         blocks.append({"dur": 30, "title": "礼物惊喜（花+票，待确认）",
                        "note": "情感高光，建议项"})

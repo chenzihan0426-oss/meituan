@@ -65,10 +65,31 @@ class Executor:
     # -- 主流程 -----------------------------------------------------------
     def run(self) -> dict:
         print(f"\n{BOLD}{CYAN}===== 开始执行（按依赖顺序下单，状态可见）====={RESET}")
+        self._exec_activities()
         rest_ref = self._exec_restaurant()
         self._exec_gift(rest_ref)
         self._exec_send_plan()
         return self._summary()
+
+    # 0. 订活动：KTV / 游乐园 / 电影… 逐个预订（含多活动并存）
+    def _activity_decisions(self):
+        return [d for d in self.plan.decisions
+                if d.type.startswith("choose_activity") and d.chosen]
+
+    def _exec_activities(self):
+        for a in self._activity_decisions():
+            ch = a.chosen
+            self._begin(f"预订活动：{ch.label}")
+            amount = (ch.price or ch.get("price_per_person") or 0) * self.party
+            if amount <= 0:
+                self._ok(f"已预约 {ch.label}（免费 / 到场即可）")
+                continue
+            try:
+                res = self._attempt(self.tb.book_activity, ch.get("id") or ch.id, amount)
+                self._ok(f"已订 {ch.label}（¥{res['amount']:.0f}）", res["amount"])
+            except ToolError as ex:
+                self._warn(f"{ch.label} 预订未成（{ex.message}）→ 改到场购票，不影响行程")
+                self.results.append(f"{ch.label} 线上预订未成 → 已转到场购票")
 
     # 1. 订餐厅：满了 → 排队报 ETA / 等位过久换备选 -----------------------
     def _exec_restaurant(self):
@@ -189,7 +210,8 @@ class Executor:
         self._ok(f"已发送给 {self.send_to}（{r['chars']} 字）")
 
     def _count_steps(self) -> int:
-        n = 1  # restaurant
+        n = len(self._activity_decisions())   # 活动（可多个）
+        n += 1  # restaurant
         gift = self.plan.find_by_type("send_gift")
         if gift and gift.chosen:
             members = gift.chosen.get("members") or []
