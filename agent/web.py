@@ -222,10 +222,12 @@ def api_start(body: dict) -> dict:
         intent.constraints["user_location"] = loc
     if parse_with_llm and intent.flags.get("party_size"):
         party = max(1, min(12, int(intent.flags["party_size"])))
-    constraints = dict(intent.constraints)
     tb = ToolBox(seed=7, fast=True, use_llm=want_real,
                  forced=dict(INTERACTIVE_FORCED) if exceptions else {})
     plan = build_first_plan(intent, tb, party_size=party)
+    # 拷贝放在 build_first_plan 之后：planner 会往 intent.constraints 写入'就近吃'(near_dining_*)
+    # 等派生信息，复用这份才完整，否则 _reselect_restaurant 会丢掉动线理由。
+    constraints = dict(intent.constraints)
     trust = _apply_trust(plan, constraints, party)   # 按信任账户调整方案（脑洞主线）
     sid = _new_session({"intent": intent, "constraints": constraints, "tb": tb,
                         "plan": plan, "party": party, "executed": False, "use_llm": want_real})
@@ -732,774 +734,636 @@ def main(argv=None):
 
 # ===========================================================================
 PAGE = r"""<!doctype html>
-<html lang="zh-CN"><head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>会替你拿主意的活动规划 Agent</title>
-<style>
-:root{
- --bg:#f3f4f9; --card:#ffffff; --ink:#1b2030; --ink2:#444b60; --muted:#8a90a4;
- --line:#e9ebf3; --soft:#f5f6fb;
- --b1:#ff8a52; --b2:#ff5d87; --grad:linear-gradient(135deg,#ff8a52 0%,#ff5d87 100%);
- --green:#12a05a; --greenbg:#e6f7ee; --amber:#cf7a09; --amberbg:#fff2dd; --amberbg:#fff3df;
- --red:#e23b5a; --redbg:#ffe9ed; --cyan:#0a97a9; --cyanbg:#e1f6f8; --blue:#3a6df0;
- --shadow:0 8px 30px rgba(35,45,90,.07); --shadow2:0 2px 10px rgba(35,45,90,.05);
-}
-*{box-sizing:border-box;margin:0;padding:0}
-body{background:var(--bg);color:var(--ink);font:15px/1.6 -apple-system,"PingFang SC","Microsoft YaHei",system-ui,sans-serif}
-a{color:inherit}
-/* 顶栏 */
-.bar{position:sticky;top:0;z-index:20;background:rgba(255,255,255,.86);backdrop-filter:saturate(1.4) blur(10px);
- border-bottom:1px solid var(--line);padding:10px 20px;display:flex;align-items:center;gap:16px;flex-wrap:wrap}
-.brand{display:flex;align-items:center;gap:10px}
-.logo{width:36px;height:36px;border-radius:11px;background:var(--grad);display:flex;align-items:center;justify-content:center;font-size:20px;box-shadow:0 4px 12px rgba(255,93,135,.35)}
-.brand h1{font-size:15.5px;font-weight:800;letter-spacing:-.01em}
-.brand p{font-size:11.5px;color:var(--muted)}
-.tabs{display:flex;gap:6px;background:var(--soft);padding:4px;border-radius:12px}
-.tabs button{border:0;background:transparent;color:var(--muted);font:inherit;font-weight:700;font-size:13px;padding:7px 14px;border-radius:9px;cursor:pointer}
-.tabs button.on{background:#fff;color:var(--ink);box-shadow:var(--shadow2)}
-.gmvbox{margin-left:auto;text-align:right;background:var(--soft);border-radius:13px;padding:6px 14px}
-.gmvbox b{font-size:20px;font-weight:800;background:var(--grad);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent}
-.gmvbox span{display:block;font-size:10.5px;color:var(--muted);letter-spacing:.04em}
-main{max-width:880px;margin:0 auto;padding:22px 18px 60px}
-/* 卡片通用 */
-.card{background:var(--card);border:1px solid var(--line);border-radius:20px;box-shadow:var(--shadow);padding:22px;margin:16px 0}
-.card.lite{box-shadow:var(--shadow2)}
-.shd{display:flex;align-items:flex-start;gap:12px;margin-bottom:14px}
-.shd .no{flex:none;width:30px;height:30px;border-radius:9px;background:var(--grad);color:#fff;font-weight:800;display:flex;align-items:center;justify-content:center;font-size:15px;box-shadow:0 4px 12px rgba(255,93,135,.3)}
-.shd h2{font-size:18px;font-weight:800;letter-spacing:-.01em}
-.shd p{font-size:13px;color:var(--muted);margin-top:1px}
-/* hero */
-.hero h2{font-size:24px;font-weight:800;letter-spacing:-.02em;line-height:1.3}
-.hero .lead{color:var(--ink2);margin:6px 0 16px;font-size:15px}
-.feats{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:18px}
-.feat{background:var(--soft);border:1px solid var(--line);border-radius:14px;padding:12px 13px}
-.feat .fi{font-size:18px}.feat b{display:block;font-size:13.5px;margin:4px 0 2px}.feat span{font-size:12px;color:var(--muted)}
-.feat.g{background:var(--greenbg);border-color:#cdeedd}.feat.a{background:var(--amberbg);border-color:#f3e2c0}.feat.r{background:var(--redbg);border-color:#f6d3d9}
-textarea,input,select{width:100%;background:var(--soft);border:1.5px solid var(--line);border-radius:13px;padding:12px 14px;font:inherit;color:var(--ink);outline:none;transition:.15s}
-textarea{min-height:74px;resize:vertical;font-size:15.5px}
-textarea:focus,input:focus,select:focus{border-color:var(--b2);background:#fff;box-shadow:0 0 0 4px rgba(255,93,135,.1)}
-.egs{margin-top:9px;font-size:13px;color:var(--muted)}
-.eg{display:inline-block;background:#fff;border:1px solid var(--line);border-radius:20px;padding:5px 12px;margin:5px 6px 0 0;cursor:pointer;color:var(--ink2);font-size:12.5px;transition:.12s}
-.eg:hover{border-color:var(--b2);color:var(--b2)}
-.trustbar{margin:12px 0 4px;padding:13px 15px;border-radius:12px;background:#fff;border:1px solid var(--line);border-left:3px solid var(--blue);box-shadow:var(--shadow2)}
-.trustbar.hidden{display:none}
-.trust-top{display:flex;justify-content:space-between;align-items:center;font-size:13.5px;font-weight:700;color:var(--ink2)}
-.trust-top b{color:var(--blue);font-size:16px}
-.trust-lv{color:var(--b2);font-weight:800;font-size:12.5px}
-.trust-track{height:9px;border-radius:6px;background:#dfe5f5;margin-top:9px;overflow:hidden}
-.trust-fill{height:100%;background:linear-gradient(90deg,#3a6df0,#ff5d87);border-radius:6px;transition:width .7s cubic-bezier(.2,.7,.2,1)}
-.trust-unlock{margin-top:10px;font-size:13px;color:var(--green);background:var(--greenbg);border-radius:9px;padding:8px 11px;line-height:1.6}
-.trust-unlock b{color:var(--green)}
-.autorow{display:flex;align-items:center;gap:12px;margin-top:14px;padding:11px 14px;background:var(--soft);border:1px solid var(--line);border-radius:12px;flex-wrap:wrap}
-.autorow .auto-l{font-size:13.5px;font-weight:700;color:var(--ink2)}
-.autorow input[type=range]{flex:1;min-width:140px;accent-color:var(--b2)}
-.autorow .auto-v{font-weight:800;color:var(--b2);min-width:84px;text-align:right}
-.membar{margin-top:12px;padding:12px 15px;border-radius:12px;background:#fff;border:1px solid var(--line);border-left:3px solid var(--blue);box-shadow:var(--shadow2);font-size:13.5px;color:var(--ink2);line-height:1.7}
-.membar b{color:var(--blue)}
-.membar .forget{color:var(--red);cursor:pointer;font-size:12.5px;margin-left:6px;text-decoration:underline}
-.quad{margin-top:14px;background:#fff;border:1px solid var(--line);border-radius:14px;padding:14px 16px;box-shadow:var(--shadow2)}
-.quad-h{font-weight:800;font-size:15px;color:var(--ink);margin-bottom:3px}
-.quad-sub{font-size:12.5px;color:var(--muted);line-height:1.6;margin-bottom:8px}
-.quad-svg{width:100%;height:auto;display:block;background:var(--soft);border-radius:10px}
-.qlist{margin-top:10px;display:flex;flex-direction:column;gap:5px}
-.qrow{display:flex;align-items:center;gap:9px;font-size:13px}
-.qno{flex:none;width:19px;height:19px;border-radius:50%;color:#fff;font-weight:800;font-size:11px;display:flex;align-items:center;justify-content:center}
-.qname{flex:1;color:var(--ink2)}
-.qd{font-weight:800;font-size:12.5px}
-.mapwrap{margin-top:14px;border:1px solid var(--line);border-radius:12px;overflow:hidden}
-.mapimg{width:100%;display:block}
-.mapcap{font-size:12.5px;color:var(--ink2);padding:8px 12px;background:var(--soft);font-weight:600}
-.cf{margin-top:8px;padding:9px 12px;border-radius:10px;background:var(--soft);border-left:3px solid var(--amber);color:var(--amber);font-size:13px;line-height:1.6}
-.tips{margin-top:14px;background:#fff;border:1px solid var(--line);border-left:3px solid var(--green);box-shadow:var(--shadow2);border-radius:12px;padding:13px 15px}
-.biz{margin-top:14px;padding:15px 16px;border-radius:14px;background:#fff;border:1px solid var(--line);border-left:3px solid var(--b2);box-shadow:var(--shadow2)}
-.biz-h{font-weight:800;font-size:14px;color:var(--ink);margin-bottom:8px}
-.biz-big{font-size:15px;color:var(--ink2);line-height:1.7}
-.biz-n{color:var(--b2);font-size:19px}
-.biz-skus{display:flex;gap:8px;flex-wrap:wrap;margin:9px 0}
-.biz-sku{background:var(--soft);border:1px solid var(--line);border-radius:18px;padding:4px 12px;font-size:12.5px;color:var(--ink2)}
-.biz-cmp{font-size:13px;color:var(--ink2);margin-top:4px}
-.biz-cmp b{color:var(--green)}
-.biz-note{margin-top:10px;font-size:12.5px;color:var(--muted);line-height:1.7;border-top:1px dashed var(--line);padding-top:9px}
-.biz-note b{color:var(--ink2)}
-.tips:empty{display:none}
-.tips-h{font-weight:800;font-size:13.5px;color:var(--green);margin-bottom:8px}
-.tip{display:flex;gap:9px;padding:5px 0;font-size:13.5px;color:var(--ink2);line-height:1.65;border-top:1px dashed var(--line)}
-.tip:first-of-type{border-top:none}
-.tip-i{flex:none;font-size:15px}
-.tagline{margin-top:12px;padding:12px 15px;border-radius:12px;background:#fff;border:1px solid var(--line);border-left:3px solid var(--b2);box-shadow:var(--shadow2);font-size:14px;color:var(--ink2);line-height:1.75}
-.tagline b{color:var(--b2)}
-@keyframes rise{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
-.reveal{animation:rise .5s both cubic-bezier(.2,.7,.2,1)}
-.aispeak{position:relative;margin:-2px 0 12px;padding:13px 15px;border-radius:12px;background:#fff;border:1px solid var(--line);border-left:3px solid var(--b2);box-shadow:var(--shadow2);color:var(--ink);font-size:14px;line-height:1.75}
-.aispeak b{color:var(--b2)}
-.aispeak .aitag{display:block;margin-top:7px;font-size:12px;color:var(--muted);font-weight:700}
-.timeline{margin-top:14px;background:var(--soft);border:1px solid var(--line);border-radius:12px;padding:12px 14px}
-.timeline:empty{display:none}
-.tl-title{font-weight:800;font-size:13.5px;margin-bottom:8px;color:var(--ink2)}
-.tl-row{display:flex;gap:12px;padding:5px 0;font-size:13.5px;border-top:1px dashed var(--line)}
-.tl-row:first-of-type{border-top:none}
-.tl-time{color:var(--b2);font-weight:700;min-width:104px;font-variant-numeric:tabular-nums}
-.tl-act{color:var(--ink2)}
-.tl-act b{color:var(--ink)}
-.replan{margin-top:14px;padding:12px 15px;border-radius:12px;background:#fff;border:1px solid var(--line);border-left:3px solid var(--green);box-shadow:var(--shadow2);color:var(--green);font-weight:700;font-size:13.5px}
-.replan:empty,.replan.hidden{display:none}
-.replan small{display:block;font-weight:500;color:var(--ink2);margin-top:4px}
-.sharebox{margin:14px 0;padding:12px 14px;background:var(--soft);border:1px dashed #c9cfe0;border-radius:12px}
-.sharebox #shareRow{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:10px}
-.sharebox #shareUrl{flex:1;min-width:200px;border:1px solid var(--line);border-radius:9px;padding:7px 10px;font-size:12.5px;color:var(--ink2);background:#fff}
-.locbar{display:flex;align-items:center;gap:9px;flex-wrap:wrap;margin-top:14px;padding:10px 12px;background:var(--soft);border:1px solid var(--line);border-radius:12px}
-.locbar #locLabel{font-size:13px;font-weight:600;color:var(--ink2)}
-.locbar #locLabel.ok{color:var(--green)}
-.locbar #locLabel.err{color:var(--red)}
-.locbtn{background:#fff;border:1px solid var(--line);border-radius:18px;padding:5px 12px;cursor:pointer;font-size:12.5px;color:var(--ink2);transition:.12s}
-.locbtn:hover{border-color:var(--b2);color:var(--b2)}
-.locbar #locInput{flex:1;min-width:160px;border:1px solid var(--line);border-radius:9px;padding:6px 10px;font-size:13px}
-.opts{display:flex;align-items:center;gap:18px;flex-wrap:wrap;margin-top:16px}
-.opts label{font-size:13.5px;color:var(--ink2);display:flex;align-items:center;gap:7px}
-.opts input[type=number]{width:72px;text-align:center}
-.chkbox{display:flex;align-items:center;gap:8px;cursor:pointer}
-.chkbox input{width:auto;accent-color:var(--b2);transform:scale(1.15)}
-.btn{border:0;border-radius:13px;font:inherit;font-weight:800;font-size:15px;padding:13px 24px;cursor:pointer;background:var(--grad);color:#fff;box-shadow:0 6px 18px rgba(255,93,135,.32);transition:.15s}
-.btn:hover{transform:translateY(-1px);box-shadow:0 9px 22px rgba(255,93,135,.4)}
-.btn:disabled{opacity:.45;cursor:default;box-shadow:none;transform:none}
-.btn.sm{font-size:13.5px;padding:9px 16px}
-.btn.ghost{background:#fff;color:var(--ink);border:1.5px solid var(--line);box-shadow:none}
-.btn.ghost:hover{border-color:var(--b2);color:var(--b2);transform:none}
-.btn.ok{background:linear-gradient(135deg,#19b06a,#0c8f78);box-shadow:0 6px 18px rgba(18,160,90,.3)}
-.statuspill{font-size:12.5px;color:var(--green);display:inline-flex;align-items:center;gap:5px}
-/* 步骤条 */
-.steps{display:flex;margin:6px 0 2px;user-select:none}
-.node{flex:1;text-align:center;position:relative;padding-top:4px;cursor:default}
-.node .sdot{width:34px;height:34px;border-radius:50%;background:#fff;border:2px solid var(--line);color:var(--muted);
- display:flex;align-items:center;justify-content:center;font-weight:800;margin:0 auto 6px;font-size:14px;transition:.2s}
-.node .slab{font-size:12.5px;color:var(--muted);font-weight:600}
-.node:not(:last-child):after{content:'';position:absolute;top:21px;left:62%;width:76%;height:2.5px;background:var(--line);border-radius:2px}
-.node.reachable{cursor:pointer}
-.node.on .sdot{background:var(--grad);border-color:transparent;color:#fff;box-shadow:0 5px 14px rgba(255,93,135,.4)}
-.node.on .slab{color:var(--ink);font-weight:800}
-.node.done .sdot{background:var(--greenbg);border-color:var(--green);color:var(--green)}
-.node.done .slab{color:var(--ink2)}
-/* 概要 */
-.srcline{margin-bottom:12px}
-.stats{display:flex;gap:10px;margin:4px 0 14px}
-.stat{flex:1;background:var(--soft);border:1px solid var(--line);border-radius:14px;padding:11px 8px;text-align:center}
-.stat b{display:block;font-size:24px;font-weight:800;line-height:1}
-.stat span{font-size:12px;color:var(--muted)}
-.stat.green b{color:var(--green)}.stat.green{background:var(--greenbg);border-color:#cdeedd}
-.stat.amber b{color:var(--amber)}.stat.amber{background:var(--amberbg);border-color:#f3e2c0}
-.stat.red b{color:var(--red)}.stat.red{background:var(--redbg);border-color:#f6d3d9}
-.facts{font-size:13px;line-height:1.7}.known{color:var(--green);font-weight:700}.unknown{color:var(--amber);font-weight:700}
-/* 决定卡 */
-.dcard{border:1px solid var(--line);border-left:4px solid var(--line);border-radius:15px;padding:15px 16px;margin:11px 0;background:#fff;box-shadow:var(--shadow2)}
-.dcard.auto{border-left-color:var(--green)}.dcard.suggest{border-left-color:var(--amber)}.dcard.ask{border-left-color:var(--red)}
-.dcard.done{border-left-color:var(--cyan);background:#fcfdfe}
-.dhead{display:flex;align-items:center;gap:10px;margin-bottom:9px}
-.dic{font-size:20px}.dtit{font-weight:800;font-size:15.5px;flex:1}
-.chips{display:flex;flex-wrap:wrap;gap:6px;margin:6px 0}
-.chip{font-size:12px;color:var(--ink2);background:var(--soft);border:1px solid var(--line);border-radius:18px;padding:3px 10px}
-.chip.on{background:var(--greenbg);border-color:#bce6cf;color:var(--green);font-weight:700}
-.chosen{font-size:14px;margin:8px 0 6px}.chosen b{font-weight:800}
-.meter{display:flex;align-items:center;gap:10px;margin:8px 0 4px}
-.meter-track{flex:1;height:9px;border-radius:6px;background:var(--soft);overflow:hidden}
-.meter-fill{display:block;height:100%;border-radius:6px}
-.meter-fill.hi{background:linear-gradient(90deg,#23c47e,#12a05a)}.meter-fill.mid{background:linear-gradient(90deg,#ffc452,#e89309)}.meter-fill.lo{background:linear-gradient(90deg,#ff7a8f,#e23b5a)}
-.meter-lab{font-size:12.5px;font-weight:800;white-space:nowrap}.meter-lab.hi{color:var(--green)}.meter-lab.mid{color:var(--amber)}.meter-lab.lo{color:var(--red)}
-.basis,.reason{font-size:13px;color:var(--muted);margin-top:3px}.reason{color:var(--ink2)}
-.hist{font-size:12px;color:var(--cyan);margin-top:4px}
-.pill{display:inline-flex;align-items:center;gap:4px;font-size:12.5px;font-weight:800;padding:4px 11px;border-radius:20px;white-space:nowrap}
-.pill.auto{background:var(--greenbg);color:var(--green)}.pill.suggest{background:var(--amberbg);color:var(--amber)}
-.pill.ask{background:var(--redbg);color:var(--red)}.pill.ok{background:var(--cyanbg);color:var(--cyan)}
-.ask{margin-top:10px;background:var(--redbg);border:1px solid #f6d3d9;border-radius:12px;padding:11px 12px}
-.ask-q{color:var(--red);font-size:13px;font-weight:700;margin-bottom:7px}
-.ask .fld{background:#fff}
-.sug{display:flex;align-items:center;gap:9px;margin-top:10px;background:var(--amberbg);border:1px solid #f3e2c0;border-radius:12px;padding:11px 12px;font-size:13.5px;font-weight:700;color:var(--amber);cursor:pointer}
-.sug input{width:auto;accent-color:var(--amber);transform:scale(1.15)}
-/* 评审 */
-.reviewsum{font-size:13.5px;color:var(--ink2);background:var(--soft);border-radius:12px;padding:10px 13px;margin-bottom:12px}
-.qhint{font-size:13px;font-weight:700;margin:6px 0}
-.qedits{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:6px}
-details.adv{margin:10px 0}details.adv summary{cursor:pointer;color:var(--b2);font-size:13px;font-weight:700}
-.advrow{display:flex;flex-wrap:wrap;gap:9px;align-items:center;margin-top:10px}
-.advrow input,.advrow select{width:auto}.advrow input[type=text],.advrow input:not([type]){min-width:150px}
-.editline{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:13.5px;padding:7px 0;border-bottom:1px dashed var(--line)}
-.editline .who{color:var(--cyan);font-weight:800}.eg2,.editline .eg{color:var(--red);cursor:pointer;font-size:12.5px;font-weight:700}
-.merge{color:var(--green);font-size:13.5px;margin:5px 0;font-weight:600}
-.noted{color:var(--cyan);font-size:13.5px;margin:5px 0}
-.sec-title{font-size:14px;font-weight:800;color:var(--ink);margin:14px 0 6px;padding-left:10px;border-left:3px solid var(--b2)}
-.conflict{background:var(--amberbg);border:1px solid #f3e2c0;border-radius:14px;padding:13px 15px;margin:10px 0}
-.conflict .sug{display:block;background:none;border:0;padding:0;color:var(--amber);font-weight:800;margin:6px 0}
-.conflict .why{color:var(--ink2);font-size:13px;white-space:pre-line;margin:5px 0 9px;line-height:1.6}
-.opt{display:flex;align-items:center;gap:9px;background:#fff;border:1.5px solid var(--line);border-radius:11px;padding:10px 12px;margin:6px 0;cursor:pointer;font-size:13.5px;transition:.12s}
-.opt:hover{border-color:var(--b2)}
-.opt input{accent-color:var(--b2);transform:scale(1.2)}
-/* 执行 */
-.exec{background:#0f1320;border-radius:15px;padding:16px 18px;font-family:"SF Mono",Menlo,Consolas,monospace;font-size:12.5px;line-height:1.7;color:#cfd6ea}
-.exec .e-step{font-weight:800;color:#fff;margin-top:9px}
-.e-ok{color:#4ade80}.e-warn{color:#fbbf24}.e-fail{color:#fb7185}.e-note{color:#94a3b8}
-.cardcta{display:flex;flex-wrap:wrap;gap:10px;margin-top:14px;align-items:center}
-.muted{color:var(--muted);font-size:13px}.hidden{display:none}
-/* 演示页 */
-.demohead{display:flex;flex-wrap:wrap;gap:14px;align-items:center}
-.seg{display:inline-flex;background:var(--soft);border-radius:11px;padding:3px}
-.seg button{border:0;background:transparent;color:var(--muted);font:inherit;font-weight:700;font-size:13px;padding:6px 13px;border-radius:8px;cursor:pointer}
-.seg button.on{background:#fff;color:var(--ink);box-shadow:var(--shadow2)}
-.demowrap{display:grid;grid-template-columns:300px 1fr;gap:16px;margin-top:14px}
-.chk{display:flex;gap:9px;padding:9px 10px;border-radius:11px;cursor:pointer}
-.chk:hover{background:var(--soft)}.chk .ic{flex:none}.chk.pass .ic{color:var(--green)}.chk.fail .ic{color:var(--red)}
-.chk .t{font-size:12.5px}.chk .t small{display:block;color:var(--muted)}
-.demoview{font-family:"SF Mono",Menlo,Consolas,monospace;font-size:12px;line-height:1.7;color:var(--ink2);max-height:62vh;overflow:auto}
-.demoview .sec-title{font-family:inherit}
-.flash{animation:fl 1.3s ease}@keyframes fl{0%{background:rgba(255,93,135,.22)}100%{background:transparent}}
-@media(max-width:680px){.feats{grid-template-columns:1fr}.demowrap{grid-template-columns:1fr}.gmvbox{order:3}}
-</style></head>
-<body>
-<div class="bar">
-  <div class="brand"><div class="logo">🤖</div>
-    <div><h1>有主见的决策搭子</h1><p>有分寸 · 敢替你拒绝 · 越用越敢替你做主</p></div></div>
-  <div class="tabs"><button id="tabI" class="on" onclick="showTab('I')">✍️ 自己输入</button>
-    <button id="tabD" onclick="showTab('D')">🎬 一键演示</button></div>
-  <div class="gmvbox"><b id="gmv">¥0</b><span>本次撬动 GMV</span></div>
-</div>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DecisionMate · 拎得清的本地活动 Agent</title>
+  <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: { sans: ['"Inter"', '-apple-system', 'BlinkMacSystemFont', '"PingFang SC"', 'sans-serif'] },
+          colors: { brand: { 50: '#fff1f2', 100: '#ffe4e6', 400: '#fb7185', 500: '#f43f5e', 600: '#e11d48', 900: '#881337' } },
+          animation: { 'blob': 'blob 10s infinite', 'shimmer': 'shimmer 2.5s linear infinite', 'float': 'float 6s ease-in-out infinite', 'fade-in-up': 'fadeInUp .5s ease both' },
+          keyframes: {
+            blob: { '0%, 100%': { transform: 'translate(0px, 0px) scale(1)' }, '33%': { transform: 'translate(30px, -50px) scale(1.1)' }, '66%': { transform: 'translate(-20px, 20px) scale(0.95)' } },
+            shimmer: { 'from': { backgroundPosition: '200% 0' }, 'to': { backgroundPosition: '-200% 0' } },
+            float: { '0%, 100%': { transform: 'translateY(0)' }, '50%': { transform: 'translateY(-10px)' } },
+            fadeInUp: { 'from': { opacity: 0, transform: 'translateY(8px)' }, 'to': { opacity: 1, transform: 'translateY(0)' } }
+          },
+          boxShadow: { 'premium': '0 10px 40px -10px rgba(0,0,0,0.08), 0 1px 3px rgba(0,0,0,0.03)', 'premium-hover': '0 20px 40px -10px rgba(0,0,0,0.12), 0 1px 3px rgba(0,0,0,0.03)', 'glow-rose': '0 0 20px rgba(244, 63, 94, 0.4)' }
+        }
+      }
+    }
+  </script>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap');
+    body { background-color: #fafafa; -webkit-font-smoothing: antialiased; }
+    [v-cloak] { display: none; }
+    .fade-step-enter-active, .fade-step-leave-active { transition: all 0.6s cubic-bezier(0.2, 0.8, 0.2, 1); }
+    .fade-step-enter-from { opacity: 0; transform: translateY(20px) scale(0.98); }
+    .fade-step-leave-to { opacity: 0; transform: translateY(-20px) scale(0.98); position: absolute; width: 100%; }
+    .list-enter-active, .list-leave-active { transition: all 0.5s ease; }
+    .list-enter-from, .list-leave-to { opacity: 0; transform: translateX(-15px); }
+    .no-scrollbar::-webkit-scrollbar { display: none; }
+    .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+    .glass-nav { background: rgba(255, 255, 255, 0.6); backdrop-filter: blur(24px) saturate(180%); -webkit-backdrop-filter: blur(24px) saturate(180%); border-bottom: 1px solid rgba(255, 255, 255, 0.5); }
+    .text-gradient-animated { background: linear-gradient(to right, #f43f5e, #f97316, #f43f5e); background-size: 200% auto; color: transparent; -webkit-background-clip: text; animation: shimmer 3s linear infinite; }
+  </style>
+</head>
 
-<main>
-<!-- ============ 交互 ============ -->
-<div id="paneI">
-  <!-- 步骤1 -->
-  <div id="pGoal" class="card hero">
-    <h2>说一句话，我帮你把下午安排明白 ☀️</h2>
-    <div class="lead">不是给你一堆链接让你自己挑——而是<b>真的把事办完</b>：去哪玩、去哪吃、要不要排队、确认后一键下单、还能发给家人一起定。</div>
-    <div class="tagline">别的 AI 听话照做；它<b>有主见</b>——你说送蛋糕，它会说"她在减肥，我不建议"；<b>敢替你拒绝</b>、把握高的<b>替你做主</b>、要紧的<b>才问你</b>，还<b>越用越敢替你定</b>。</div>
-    <div class="feats">
-      <div class="feat g"><div class="fi">✅</div><b>有把握 → 直接定</b><span>常识性的我自己拍板，不烦你</span></div>
-      <div class="feat a"><div class="fi">💡</div><b>拿不准 → 给建议</b><span>给方案，最后你点头</span></div>
-      <div class="feat r"><div class="fi">❓</div><b>代价高 → 停下来问</b><span>预算/到家时间这种，我不敢替你定</span></div>
-    </div>
-    <textarea id="goal" placeholder="例如：今天下午想和老婆孩子出去玩几小时，别离家太远，老婆最近在减肥，帮我安排"></textarea>
-    <div class="egs">点一下直接填：
-      <span class="eg" onclick="setGoal(this)">今天下午和老婆孩子出去玩，别太远，老婆最近在减肥</span>
-      <span class="eg" onclick="setGoal(this)">周末四个朋友聚餐，离家别太远，口味不太一样</span>
-      <span class="eg" onclick="setGoal(this)">下午带5岁孩子去游乐场，再吃个火锅</span></div>
-    <div class="locbar" id="locbar">
-      <span id="locLabel" class="muted">📍 正在获取你的位置…</span>
-      <button class="locbtn" type="button" onclick="detectLoc()" title="用浏览器定位重新获取">↻ 重新定位</button>
-      <input id="locInput" placeholder="或手动输入地点，如：国贸 / 五道口 / 三里屯"
-             onkeydown="if(event.key==='Enter')setLocManual()">
-      <button class="locbtn" type="button" onclick="setLocManual()">用这个地点</button>
-    </div>
-    <div class="opts">
-      <label>人数 <input id="party" type="number" value="3" min="1" max="12"></label>
-      <label class="chkbox" title="AI 听懂你的自然语言 + 高德真实 POI；调不通自动回退本地库"><input id="useLlm" type="checkbox" checked> 🌐 AI 听懂你的话 + 真实数据</label>
-      <label class="chkbox" title="执行时故意触发一次满座/超时/配送失败，演示兜底"><input id="exc" type="checkbox" checked> 演示异常兜底</label>
-      <span id="llmStatus" class="muted"></span>
-      <button class="btn" id="startBtn" onclick="start()" style="margin-left:auto">✨ 帮我安排</button>
-    </div>
+<body class="text-slate-800 relative overflow-x-hidden">
+  <div class="fixed inset-0 overflow-hidden pointer-events-none -z-10">
+    <div class="absolute top-[-10%] left-[-10%] w-96 h-96 bg-rose-200/40 rounded-full mix-blend-multiply filter blur-[80px] animate-blob"></div>
+    <div class="absolute top-[-10%] right-[-10%] w-96 h-96 bg-orange-200/40 rounded-full mix-blend-multiply filter blur-[80px] animate-blob" style="animation-delay: 2s"></div>
+    <div class="absolute bottom-[-20%] left-[20%] w-[500px] h-[500px] bg-pink-200/30 rounded-full mix-blend-multiply filter blur-[100px] animate-blob" style="animation-delay: 4s"></div>
   </div>
 
-  <div class="steps" id="stepper">
-    <div class="node on" data-step="0" onclick="goto(0)"><span class="sdot">1</span><span class="slab">说目标</span></div>
-    <div class="node" data-step="1" onclick="goto(1)"><span class="sdot">2</span><span class="slab">看方案·拍板</span></div>
-    <div class="node" data-step="2" onclick="goto(2)"><span class="sdot">3</span><span class="slab">邀人评审</span></div>
-    <div class="node" data-step="3" onclick="goto(3)"><span class="sdot">4</span><span class="slab">执行下单</span></div>
-  </div>
+  <div id="app" v-cloak class="min-h-screen flex flex-col relative">
 
-  <!-- 步骤2 -->
-  <div id="pPlan" class="card hidden">
-    <div class="shd"><div class="no">2</div><div><h2>这是我的方案，你来拍板</h2>
-      <p>每个决定都标了「我有多大把握」和「我打算怎么处理」。<b style="color:var(--red)">红色❓需要你回答</b>，黄色💡勾一下是否采纳。</p></div></div>
-    <div class="srcline" id="src"></div>
-    <div id="trustBar" class="trustbar hidden"></div>
-    <div class="stats" id="summary"></div>
-    <div class="autorow">
-      <span class="auto-l">🎚️ 我希望它替我做主的程度</span>
-      <input id="autonomy" type="range" min="0" max="2" step="1" value="1" oninput="setAutonomy(this.value)">
-      <span id="autonomyLabel" class="auto-v">平衡</span>
-    </div>
-    <div id="memoryBanner" class="membar hidden"></div>
-    <div id="quadrant"></div>
-    <div class="facts"><div id="known"></div><div id="unknown"></div></div>
-    <div id="decisions" style="margin-top:8px"></div>
-    <div id="mapbox"></div>
-    <div id="timeline" class="timeline"></div>
-    <div id="tips"></div>
-    <div id="replanBanner" class="replan hidden"></div>
-    <div style="margin-top:16px"><button class="btn" onclick="submitAnswers()">提交回答，继续 →</button></div>
-  </div>
-
-  <!-- 步骤3 -->
-  <div id="pReview" class="card hidden">
-    <div class="shd"><div class="no">3</div><div><h2>邀人评审（可选 · 升维亮点）</h2>
-      <p>攒局不是一个人的事。点下面按钮模拟"局里的人"各自改方案——我自动合并无争议的，撞车处按「内容契合度 × 谁说的」给带理由的建议。</p></div></div>
-    <div class="reviewsum" id="reviewSummary"></div>
-    <div id="reviewTimeline" class="timeline"></div>
-    <div id="reviewTips"></div>
-    <div class="sharebox">
-      <button class="btn ghost sm" type="button" onclick="shareLink()">📲 生成链接，发给朋友自己改</button>
-      <div id="shareRow" class="hidden">
-        <input id="shareUrl" onclick="this.select()" title="若手机打不开，把这里的 IP 改成你电脑 WiFi 的 IP">
-        <button class="locbtn" type="button" onclick="copyShare()">复制</button>
-        <button class="locbtn" type="button" onclick="pullEdits()">🔄 收取</button>
-        <span id="shareRecv" class="muted"></span>
+    <header class="fixed top-0 w-full z-50 glass-nav transition-all duration-300">
+      <div class="max-w-5xl mx-auto px-6 h-16 flex items-center justify-between">
+        <div class="flex items-center gap-3">
+          <div class="w-8 h-8 rounded-full bg-slate-900 text-white flex items-center justify-center text-sm font-black shadow-lg">AI</div>
+          <span class="font-bold tracking-tight text-[15px]">Decision<span class="text-slate-400 font-normal">Mate</span></span>
+        </div>
+        <div class="hidden md:flex bg-slate-200/50 p-1 rounded-full border border-white/50 backdrop-blur-md">
+          <button @click="activeTab = 'I'" :class="['px-5 py-1.5 rounded-full text-[13px] font-semibold transition-all duration-300', activeTab === 'I' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-800']">交互模式</button>
+          <button @click="activeTab = 'D'" :class="['px-5 py-1.5 rounded-full text-[13px] font-semibold transition-all duration-300', activeTab === 'D' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-800']">演示验收</button>
+        </div>
+        <div class="flex items-center gap-5">
+          <div v-if="trust" class="hidden sm:flex flex-col items-end justify-center" title="信任账户：你每确认它一次，它下次敢替你多定一点">
+            <div class="text-[10px] font-bold text-slate-400 uppercase tracking-widest leading-none mb-1">🤝 信任 {{ trust.label || '' }}</div>
+            <div class="font-black text-sm leading-none tracking-tighter text-slate-900">{{ trust.score }}<span class="text-slate-400 font-normal text-[11px]">/100</span></div>
+          </div>
+          <div class="flex flex-col items-end justify-center">
+            <div class="text-[10px] font-bold text-slate-400 uppercase tracking-widest leading-none mb-1">撬动 GMV</div>
+            <div class="font-black text-lg leading-none tracking-tighter text-slate-900">¥{{ Math.round(gmv).toLocaleString() }}</div>
+          </div>
+        </div>
       </div>
-      <div class="muted" style="font-size:12px;margin-top:6px">朋友同一 WiFi 用手机打开即可改；或你自己另开一个无痕窗口模拟朋友。提交后自动并入下方改动（每 4 秒刷新一次）。</div>
-    </div>
-    <div class="qhint">① 一键模拟几个人的改动（或用上面的链接让朋友真改）：</div>
-    <div class="qedits" id="quickEdits"></div>
-    <details class="adv"><summary>高级：自定义一条改动（指定谁、权重、换哪家 / 加什么约束）</summary>
-      <div class="advrow">
-        <input id="edAuthor" placeholder="谁（如 老婆）" style="width:130px">
-        <label class="muted">权重</label><input id="edWeight" type="number" value="0.6" min="0" max="1" step="0.1" style="width:70px">
-        <select id="edType" onchange="edTypeChange()" style="width:120px"><option value="restaurant">换餐厅</option><option value="constraint">加约束</option></select>
-        <select id="edRest" style="min-width:200px"></select>
-        <input id="edConstraint" class="hidden" placeholder="如：我对海鲜过敏">
-        <button class="btn ghost sm" onclick="addEdit()">+ 添加</button>
+    </header>
+
+    <main class="flex-1 w-full max-w-3xl mx-auto px-6 pt-32 pb-40 relative">
+
+      <div v-show="activeTab === 'I'" class="relative">
+
+        <div class="flex items-center gap-2 mb-12">
+          <template v-for="(step, index) in steps" :key="index">
+            <div @click="goto(index)" :class="['h-1 rounded-full transition-all duration-500 cursor-pointer', currentStep === index ? 'w-12 bg-slate-900' : index < maxReached ? 'w-4 bg-slate-300 hover:bg-slate-400' : 'w-4 bg-slate-200 opacity-50 pointer-events-none']"></div>
+          </template>
+          <span class="ml-3 text-[11px] font-bold uppercase tracking-widest text-slate-400">{{ steps[currentStep] }}</span>
+        </div>
+
+        <div class="relative min-h-[400px]">
+          <transition name="fade-step">
+
+            <!-- 步骤 1: 输入 -->
+            <div v-if="currentStep === 0" class="absolute w-full top-0 left-0">
+              <div class="mb-12">
+                <h1 class="text-4xl md:text-5xl font-extrabold tracking-tight text-slate-900 leading-[1.1] mb-6">
+                  一句话，<br><span class="text-gradient-animated">把这一局安排明白。</span>
+                </h1>
+                <p class="text-slate-500 text-lg leading-relaxed max-w-xl font-light">
+                  一个<b class="font-semibold text-slate-700">拎得清</b>的 AI：能办的直接办，拿不准的给建议，<b class="font-semibold text-slate-700">只有它真不知道的才停下来问你</b>。绝不丢一堆链接让你自己挑。
+                </p>
+              </div>
+
+              <div class="relative group">
+                <div class="absolute -inset-1 bg-gradient-to-r from-rose-400 via-orange-400 to-rose-400 rounded-[2rem] blur opacity-20 group-hover:opacity-40 transition duration-1000 group-hover:duration-200"></div>
+                <div class="relative bg-white/80 backdrop-blur-xl border border-white/60 rounded-[2rem] shadow-premium p-2">
+                  <textarea v-model="form.goal" rows="3" class="w-full bg-transparent p-6 text-lg text-slate-800 placeholder-slate-300 outline-none resize-none font-medium leading-relaxed" placeholder="描述你的想法，例如：今天下午想和老婆孩子出去玩几小时，别离家太远，老婆在减肥..."></textarea>
+                  <div class="flex items-center justify-between p-2 mt-2 bg-slate-50/50 rounded-2xl border border-slate-100">
+                    <div class="flex gap-4 px-4">
+                      <label class="flex items-center gap-2 text-[13px] font-semibold text-slate-600">
+                        <span class="text-slate-400">👥</span>
+                        <input v-model.number="form.partySize" type="number" min="1" max="12" class="w-8 bg-transparent border-b border-slate-300 focus:border-rose-500 outline-none text-center font-bold text-slate-900">
+                      </label>
+                      <div class="w-px h-4 bg-slate-200 my-auto"></div>
+                      <label class="flex items-center gap-2 text-[13px] font-semibold text-slate-600 cursor-pointer hover:text-slate-900 transition" title="勾选后用高德真实 POI（需配置 key），否则用内置示例库">
+                        <input v-model="form.useLlm" type="checkbox" class="accent-slate-900 w-4 h-4 cursor-pointer"> 真实地理数据
+                      </label>
+                      <div class="w-px h-4 bg-slate-200 my-auto"></div>
+                      <label class="flex items-center gap-2 text-[13px] font-semibold text-slate-600 cursor-pointer hover:text-slate-900 transition" title="开启后执行阶段会演示满座/超时/配送失败回滚等异常兜底">
+                        <input v-model="form.exceptions" type="checkbox" class="accent-slate-900 w-4 h-4 cursor-pointer"> 异常演练
+                      </label>
+                    </div>
+                    <button @click="startPlan" :disabled="isAnalyzing" class="bg-slate-900 text-white font-bold py-3 px-8 rounded-xl shadow-lg hover:bg-rose-500 hover:shadow-glow-rose hover:-translate-y-0.5 transition-all duration-300 disabled:opacity-50 disabled:hover:transform-none">
+                      <span v-if="isAnalyzing" class="flex items-center gap-2">
+                        <svg class="animate-spin h-4 w-4 text-white" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
+                        思考中...
+                      </span>
+                      <span v-else>生成方案 ✨</span>
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              <!-- 真实定位条 -->
+              <div class="mt-5 flex items-center gap-2 flex-wrap">
+                <span :class="['text-[13px] font-semibold px-1', locOk ? 'text-emerald-600' : 'text-slate-500']">{{ locStatus }}</span>
+                <button @click="detectLoc" class="text-[12px] font-bold text-slate-500 hover:text-rose-500 bg-white border border-slate-200 rounded-full px-3 py-1 transition active:scale-95">↻ 重新定位</button>
+                <div class="flex items-center gap-1 ml-auto">
+                  <input v-model="addrInput" @keyup.enter="lockAddr" placeholder="或手动输入地点，如 国贸" class="text-[12px] bg-white border border-slate-200 rounded-full px-4 py-1.5 outline-none focus:border-rose-300 w-44">
+                  <button @click="lockAddr" class="text-[12px] font-bold text-white bg-slate-900 hover:bg-rose-500 rounded-full px-4 py-1.5 transition active:scale-95">锁定</button>
+                </div>
+              </div>
+
+              <div v-if="errorMsg" class="mt-4 text-sm text-rose-500 font-semibold pl-2">{{ errorMsg }}</div>
+
+              <div v-if="memorySummary" class="mt-6 bg-indigo-50/70 border border-indigo-100 rounded-2xl px-5 py-3 text-[13px] text-indigo-700 font-medium flex items-center justify-between">
+                <span>🧠 我还记得你：{{ memorySummary }}</span>
+                <button @click="forgetMe" class="text-indigo-400 hover:text-rose-500 text-xs font-bold">忘记我</button>
+              </div>
+
+              <div class="mt-8">
+                <span class="text-[10px] font-bold text-slate-400 uppercase tracking-widest block mb-3 pl-2">试试这些灵感</span>
+                <div class="flex flex-wrap gap-2">
+                  <button v-for="eg in examples" @click="form.goal = eg" class="bg-white/60 backdrop-blur-sm border border-slate-200 hover:border-rose-300 text-slate-600 hover:text-rose-600 rounded-full px-5 py-2 text-[13px] font-medium shadow-sm hover:shadow transition-all active:scale-95">{{ eg }}</button>
+                </div>
+              </div>
+            </div>
+
+            <!-- 步骤 2: 方案拍板 -->
+            <div v-else-if="currentStep === 1 && planData" class="absolute w-full top-0 left-0 pb-32">
+              <div class="mb-10">
+                <h2 class="text-3xl font-extrabold tracking-tight text-slate-900 mb-2">我做好了决定，请过目。</h2>
+                <p class="text-slate-500 text-[15px]">我替你处理了 <b class="text-emerald-600 font-semibold">{{ countDispoAll('auto') }}</b> 件、给了 <b class="text-amber-600 font-semibold">{{ countDispoAll('suggest') }}</b> 条建议，只回头问你 <b class="text-rose-500 font-semibold">{{ countDispoAll('ask') }}</b> 件——这几件只有你知道，我不替你瞎猜。</p>
+              </div>
+
+              <div class="space-y-6">
+                <transition-group name="list">
+                  <div v-for="(dec, idx) in planData.decisions" :key="dec.id" :class="['relative transition-all duration-500 rounded-3xl p-6 md:p-8', isResolved(dec.status) ? 'bg-transparent border border-slate-200 opacity-60' : getCardStyle(dec.disposition)]" :style="{ transitionDelay: `${idx * 80}ms` }">
+                    <div class="flex items-start justify-between gap-4 mb-4">
+                      <div class="flex items-center gap-4">
+                        <div :class="['w-10 h-10 rounded-2xl flex items-center justify-center text-xl shrink-0', getIconBg(dec.disposition, dec.status)]">{{ getIcon(dec.type) }}</div>
+                        <h3 :class="['text-lg font-bold tracking-tight', isResolved(dec.status) ? 'text-slate-500' : 'text-slate-900']">{{ dec.description }}</h3>
+                      </div>
+                      <div class="shrink-0" v-html="getMinimalBadge(dec.disposition, dec.status)"></div>
+                    </div>
+
+                    <div v-if="dec.chosen" class="pl-14">
+                      <div class="inline-flex items-center gap-2 bg-slate-100/80 px-4 py-2 rounded-xl text-[14px] text-slate-800 font-semibold">
+                        <span class="text-emerald-500 text-lg leading-none">✓</span> {{ dec.chosen.label }}
+                      </div>
+                    </div>
+
+                    <div v-if="dec.options && dec.options.length && !isResolved(dec.status) && dec.type === 'choose_restaurant'" class="pl-14 mt-4">
+                      <div class="text-[11px] font-bold text-slate-400 uppercase tracking-widest mb-3">筛选候选池</div>
+                      <div class="flex flex-wrap gap-2">
+                        <span v-for="opt in dec.options.slice(0,4)" :key="opt.id" class="text-[12px] px-4 py-2 rounded-xl border border-slate-200 bg-white text-slate-600 font-medium hover:border-slate-300 transition-colors cursor-default shadow-sm">
+                          {{ opt.label }} <span v-if="opt.per_capita" class="text-slate-400 ml-1">¥{{Math.round(opt.per_capita)}}</span>
+                        </span>
+                      </div>
+                    </div>
+
+                    <div v-if="!isResolved(dec.status)" class="pl-14 mt-6">
+                      <div v-if="dec.disposition === 'ask'" class="relative animate-float">
+                        <div class="absolute inset-y-0 left-4 flex items-center pointer-events-none"><span class="text-rose-500 text-lg">✦</span></div>
+                        <input v-model="answers[dec.id]" @keyup.enter="submitAnswers" class="w-full bg-white/80 backdrop-blur border-2 border-rose-200 focus:border-rose-500 focus:ring-4 focus:ring-rose-500/10 rounded-2xl pl-12 pr-6 py-4 text-[15px] font-medium text-slate-900 outline-none transition-all shadow-sm placeholder-rose-300/80" placeholder="请告诉我具体预期（例如：人均150内 / 7点前到家）">
+                      </div>
+                      <label v-if="dec.disposition === 'suggest'" class="group flex items-center gap-4 cursor-pointer">
+                        <div class="relative flex items-center justify-center w-6 h-6">
+                          <input type="checkbox" v-model="suggestions[dec.id]" class="peer appearance-none w-6 h-6 border-2 border-amber-300 rounded-lg checked:bg-amber-500 checked:border-amber-500 transition-all cursor-pointer">
+                          <svg class="absolute text-white pointer-events-none opacity-0 peer-checked:opacity-100 w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="3"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"></path></svg>
+                        </div>
+                        <span class="text-[15px] font-bold text-amber-800 group-hover:text-amber-600 transition-colors">完美，就按这个办</span>
+                      </label>
+                    </div>
+
+                    <div class="pl-14 mt-6">
+                      <details class="group cursor-pointer">
+                        <summary class="text-[12px] font-semibold text-slate-400 hover:text-slate-600 list-none flex items-center gap-1 transition-colors">
+                          <span class="text-xs transition-transform group-open:rotate-90">▶</span> 查看 AI 思考路径
+                        </summary>
+                        <div class="mt-3 bg-slate-50 border border-slate-100 rounded-xl p-4 text-[13px] text-slate-500 leading-relaxed space-y-2">
+                          <div class="flex items-start gap-2 pb-2 border-b border-slate-200/60">
+                            <span class="font-semibold text-slate-700 shrink-0">置信度 {{ (dec.confidence * 100).toFixed(0) }}%</span>
+                            <span class="text-slate-400">·</span>
+                            <span class="text-slate-500">{{ dec.confidence_basis }}</span>
+                          </div>
+                          <div>{{ dec.reasoning }}</div>
+                          <div v-if="dec.counterfactual" class="text-rose-400/90 bg-rose-50/60 rounded-lg px-3 py-2 mt-1"><b class="font-semibold">反事实：</b>{{ dec.counterfactual }}</div>
+                        </div>
+                      </details>
+                    </div>
+                  </div>
+                </transition-group>
+              </div>
+
+              <!-- 时间线（含倒排 + 排不开提示） -->
+              <div v-if="planData.timeline && planData.timeline.length" class="mt-10 bg-white rounded-3xl shadow-sm border border-slate-100 p-6 md:p-8">
+                <div class="text-[11px] font-bold text-slate-400 uppercase tracking-widest mb-5">⏱️ 智能时间线（按"几点到家"倒排）</div>
+                <div class="space-y-3">
+                  <div v-for="(s, i) in planData.timeline" :key="i" class="flex gap-4 items-start">
+                    <div class="text-[13px] font-mono font-bold text-slate-400 w-24 shrink-0 pt-0.5">{{ s.start }}<span v-if="s.end !== s.start">–{{ s.end }}</span></div>
+                    <div class="flex-1 border-l-2 border-slate-100 pl-4 pb-2">
+                      <div :class="['text-[14px] font-bold', s.title.includes('⚠️') ? 'text-rose-500' : 'text-slate-800']">{{ s.title }}</div>
+                      <div class="text-[12px] text-slate-400 mt-0.5">{{ s.reason }}</div>
+                    </div>
+                  </div>
+                </div>
+                <div v-if="planData.tips && planData.tips.length" class="mt-6 pt-5 border-t border-slate-100 space-y-2">
+                  <div v-for="(t, i) in planData.tips" :key="i" class="text-[13px] text-slate-500 leading-relaxed">{{ t }}</div>
+                </div>
+              </div>
+
+              <!-- 真实路线地图（高德实景，仅"真实地理数据"开启时出） -->
+              <div v-if="mapUrl" class="mt-8 bg-white rounded-3xl shadow-sm border border-slate-100 p-4">
+                <div class="text-[11px] font-bold text-slate-400 uppercase tracking-widest mb-3 px-2">🗺️ 真实路线（高德实景 · 家①→玩②→吃③，评委可当场搜证）</div>
+                <img :src="mapUrl" @error="mapUrl = ''" class="w-full rounded-2xl" alt="高德真实路线图">
+              </div>
+
+              <div class="fixed bottom-8 left-1/2 -translate-x-1/2 w-[calc(100%-3rem)] max-w-3xl z-40 bg-slate-900/90 backdrop-blur-2xl rounded-3xl p-3 shadow-2xl border border-white/10 flex items-center justify-between">
+                <div class="text-white text-sm font-medium px-4 flex items-center gap-3">
+                  <div v-if="countDispo('ask') > 0" class="relative flex h-3 w-3"><span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-rose-400 opacity-75"></span><span class="relative inline-flex rounded-full h-3 w-3 bg-rose-500"></span></div>
+                  <div v-else class="w-2 h-2 rounded-full bg-emerald-500"></div>
+                  {{ countDispo('ask') > 0 ? `还有 ${countDispo('ask')} 件需要你回答` : '都齐了，可以往下走。' }}
+                </div>
+                <button @click="submitAnswers" :disabled="isSubmittingAnswers" class="bg-white text-slate-900 font-extrabold py-3 px-8 rounded-2xl hover:scale-[0.98] transition-transform active:scale-95 disabled:opacity-50 disabled:hover:scale-100">{{ isSubmittingAnswers ? '重新规划中...' : '确认方案 →' }}</button>
+              </div>
+            </div>
+
+            <!-- 步骤 3: 协同评审 -->
+            <div v-else-if="currentStep === 2" class="absolute w-full top-0 left-0 pb-20">
+              <div class="mb-10 text-center">
+                <div class="w-16 h-16 rounded-3xl bg-indigo-100 text-indigo-500 mx-auto flex items-center justify-center text-3xl mb-6 shadow-sm">👥</div>
+                <h2 class="text-3xl font-extrabold tracking-tight text-slate-900 mb-3">众口难调？拉朋友一起改</h2>
+                <p class="text-slate-500 text-[15px] max-w-lg mx-auto">把链接发给同行的人，各自上去改。AI 自动合并无争议的，撞车处按「内容契合 × 谁说的(权重)」给带理由的建议，拍板权留给你。</p>
+              </div>
+
+              <div v-if="shareUrl" class="bg-white rounded-2xl shadow-sm border border-slate-100 p-5 mb-6 flex items-center gap-3">
+                <span class="text-[12px] font-bold text-slate-400 shrink-0">📲 分享链接</span>
+                <input :value="shareUrl" readonly class="flex-1 bg-slate-50 border border-slate-100 rounded-lg px-3 py-2 text-[12px] text-slate-500 font-mono outline-none">
+                <button @click="copyShare" class="bg-slate-900 text-white text-[12px] font-bold px-4 py-2 rounded-lg hover:bg-rose-500 transition">{{ copied ? '已复制' : '复制' }}</button>
+              </div>
+
+              <div class="bg-white rounded-[2rem] shadow-premium border border-slate-100 p-8 mb-8">
+                <div class="text-[11px] font-bold text-slate-400 uppercase tracking-widest mb-5">模拟好友反馈注入（也可让朋友扫上面链接真改）</div>
+                <div class="flex flex-wrap gap-3 mb-6">
+                  <button @click="wifeFar" class="bg-slate-50 hover:bg-indigo-50 hover:text-indigo-600 border border-slate-200 text-slate-600 font-semibold rounded-xl px-5 py-2.5 transition-all active:scale-95 text-[14px]">👩 妻子嫌远，要换最近的</button>
+                  <button @click="friendUpscale" class="bg-slate-50 hover:bg-indigo-50 hover:text-indigo-600 border border-slate-200 text-slate-600 font-semibold rounded-xl px-5 py-2.5 transition-all active:scale-95 text-[14px]">🧑 朋友想换一家</button>
+                  <button @click="allergy" class="bg-slate-50 hover:bg-rose-50 hover:text-rose-600 border border-slate-200 text-slate-600 font-semibold rounded-xl px-5 py-2.5 transition-all active:scale-95 text-[14px]">⚠️ 有人海鲜过敏</button>
+                </div>
+
+                <div v-if="edits.length > 0" class="space-y-3 p-4 bg-slate-50/50 rounded-2xl border border-slate-100">
+                  <div class="text-xs font-bold text-slate-400 mb-2">待处理队列：</div>
+                  <transition-group name="list">
+                    <div v-for="(edit, idx) in edits" :key="idx" class="flex items-center justify-between bg-white px-4 py-3 rounded-xl shadow-sm border border-slate-100">
+                      <div class="flex items-center gap-3">
+                        <div class="w-8 h-8 rounded-full bg-gradient-to-br from-indigo-100 to-purple-100 text-indigo-700 font-black text-xs flex items-center justify-center">{{ edit.author[0] }}</div>
+                        <div><span class="text-[13px] font-bold text-slate-700 mr-2">{{ edit.author }}</span><span class="text-[13px] text-slate-500">{{ edit.type === 'constraint' ? `提出新要求："${edit.constraint}"` : `要求换店 → ${edit._label}` }}</span></div>
+                      </div>
+                      <button @click="edits.splice(idx, 1)" class="text-slate-300 hover:text-rose-500 transition-colors p-1">✕</button>
+                    </div>
+                  </transition-group>
+                </div>
+              </div>
+
+              <!-- 评审结果（真实引擎输出） -->
+              <div v-if="reviewResult" class="bg-white rounded-[2rem] shadow-premium border border-slate-100 p-8 mb-8 animate-fade-in-up">
+                <div v-if="reviewResult.auto_merged.length" class="mb-6">
+                  <div class="text-[11px] font-bold text-emerald-500 uppercase tracking-widest mb-3">✅ 自动合并（无争议）</div>
+                  <div v-for="(m, i) in reviewResult.auto_merged" :key="i" class="text-[13px] text-slate-600 mb-1">· {{ m.author }}：{{ m.constraint || m.label }} <span class="text-slate-400">— {{ m.merged_note }}</span></div>
+                </div>
+                <div v-if="reviewResult.conflicts.length">
+                  <div class="text-[11px] font-bold text-rose-500 uppercase tracking-widest mb-3">⚖️ 撞车待裁决（带理由的建议）</div>
+                  <div v-for="(c, i) in reviewResult.conflicts" :key="i" class="bg-rose-50/50 border border-rose-100 rounded-xl p-4 mb-3">
+                    <div class="text-[13px] font-bold text-slate-700 mb-1">🤖 建议采纳：{{ c.suggestion ? c.suggestion.label : '—' }}（{{ c.suggestion_owner }}）</div>
+                    <div class="text-[12px] text-slate-500 whitespace-pre-line leading-relaxed">{{ c.reason }}</div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="flex gap-4">
+                <button @click="goExecute" class="flex-1 bg-white border border-slate-200 text-slate-600 hover:text-slate-900 font-bold py-4 rounded-2xl hover:border-slate-300 transition-all active:scale-95 shadow-sm">跳过评审，直接执行</button>
+                <button v-if="!reviewResult" @click="runReview" :disabled="edits.length === 0 || isReviewing" class="flex-1 bg-slate-900 text-white font-extrabold py-4 rounded-2xl shadow-xl hover:shadow-2xl hover:-translate-y-0.5 transition-all disabled:opacity-50 disabled:hover:transform-none active:scale-95">{{ isReviewing ? '合并中...' : '让 AI 合并并解决冲突 →' }}</button>
+                <button v-else @click="resolveAndExecute" :disabled="isReviewing" class="flex-1 bg-slate-900 text-white font-extrabold py-4 rounded-2xl shadow-xl hover:-translate-y-0.5 transition-all active:scale-95 disabled:opacity-50">按 AI 建议裁决并执行 →</button>
+              </div>
+            </div>
+
+            <!-- 步骤 4: 执行 -->
+            <div v-else-if="currentStep === 3" class="absolute w-full top-0 left-0">
+              <div class="mb-8">
+                <h2 class="text-3xl font-extrabold tracking-tight text-slate-900 mb-2">正在为你调度执行。</h2>
+                <p class="text-slate-500 text-[15px]">真实跑「查→订→买→送→发」闭环，含满座/超时重试/配送失败回滚补偿。</p>
+              </div>
+
+              <div class="bg-white rounded-[2rem] shadow-premium border border-slate-100 p-6 md:p-8">
+                <div class="text-[11px] font-bold text-slate-400 uppercase tracking-widest mb-5">⚙️ 执行过程 · 查 → 订 → 买 → 送 → 发</div>
+                <div class="space-y-2.5 max-h-[420px] overflow-y-auto no-scrollbar">
+                  <div v-for="(log, i) in execLogs" :key="i" v-html="log" class="animate-fade-in-up"></div>
+                  <div v-if="isExecuting" class="flex items-center gap-2 text-slate-400 text-[13px] pt-2">
+                    <span class="w-2 h-2 bg-rose-400 rounded-full animate-ping"></span> 正在调度…
+                  </div>
+                </div>
+              </div>
+
+              <!-- 商业小结：真实下单算出的连带率 -->
+              <div v-if="business" class="mt-8 grid grid-cols-2 md:grid-cols-4 gap-4 animate-fade-in-up">
+                <div class="bg-white rounded-2xl border border-slate-100 shadow-sm p-5 text-center"><div class="text-2xl font-black text-slate-900">{{ business.sku_count }}</div><div class="text-[11px] font-bold text-slate-400 uppercase tracking-widest mt-1">连带品类</div></div>
+                <div class="bg-white rounded-2xl border border-slate-100 shadow-sm p-5 text-center"><div class="text-2xl font-black text-slate-900">¥{{ business.gmv }}</div><div class="text-[11px] font-bold text-slate-400 uppercase tracking-widest mt-1">单局客单</div></div>
+                <div class="bg-white rounded-2xl border border-slate-100 shadow-sm p-5 text-center"><div class="text-2xl font-black text-rose-500">{{ business.multiple }}×</div><div class="text-[11px] font-bold text-slate-400 uppercase tracking-widest mt-1">vs 单点外卖</div></div>
+                <div class="bg-white rounded-2xl border border-slate-100 shadow-sm p-5 text-center"><div class="text-2xl font-black text-slate-900">{{ business.party }}</div><div class="text-[11px] font-bold text-slate-400 uppercase tracking-widest mt-1">服务人数</div></div>
+              </div>
+
+              <div v-if="!isExecuting && execLogs.length > 0" class="mt-8 flex justify-center gap-6 animate-fade-in-up">
+                <button v-if="hasCard" @click="openCard" class="text-sm font-bold text-slate-500 hover:text-slate-900 transition-colors">📲 查看可分享方案卡</button>
+                <button @click="resetFlow" class="text-sm font-bold text-slate-500 hover:text-slate-900 flex items-center gap-2 transition-colors">
+                  <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>
+                  开启新会话
+                </button>
+              </div>
+            </div>
+
+          </transition>
+        </div>
       </div>
-    </details>
-    <div id="editList"></div>
-    <div class="cardcta">
-      <button class="btn" id="reviewBtn" onclick="runReview()" disabled>② 运行评审合并 →</button>
-      <button class="btn ghost" onclick="execute()">跳过评审，直接执行 →</button>
-    </div>
-    <div id="autoMerged"></div>
-    <div id="conflicts"></div>
-    <div id="resolveRow" class="cardcta hidden"><button class="btn" onclick="applyResolve()">③ 应用裁决，生成新版方案 →</button></div>
-    <div id="v2Box" class="hidden" style="margin-top:8px">
-      <div class="sec-title">新版方案 <span class="muted" id="v2Ver"></span></div>
-      <div id="v2Decisions"></div>
-      <div class="cardcta"><button class="btn ok" onclick="execute()">确认这版，去执行 →</button></div>
-    </div>
+
+      <!-- ============ 演示验收模式（接真实 /api/run + /api/selftest）============ -->
+      <div v-show="activeTab === 'D'" class="mt-4">
+        <div class="mb-8">
+          <h2 class="text-3xl font-extrabold tracking-tight text-slate-900 mb-2">演示验收台</h2>
+          <p class="text-slate-500 text-[15px]">对照 PRD 9 条「必须演出来的瞬间」核验真实输出，外加 93 项内部逻辑自检。评委可当场点。</p>
+        </div>
+        <div class="flex flex-wrap gap-3 mb-6">
+          <button @click="runDemo('family')" :disabled="demoLoading" class="bg-slate-900 text-white font-bold px-6 py-3 rounded-xl hover:bg-rose-500 transition disabled:opacity-50">跑家庭场景</button>
+          <button @click="runDemo('friends')" :disabled="demoLoading" class="bg-white border border-slate-200 text-slate-700 font-bold px-6 py-3 rounded-xl hover:border-slate-300 transition disabled:opacity-50">跑朋友场景</button>
+          <button @click="runSelftest" :disabled="stLoading" class="bg-white border border-slate-200 text-slate-700 font-bold px-6 py-3 rounded-xl hover:border-slate-300 transition disabled:opacity-50">跑自检 93 项</button>
+          <span v-if="stResult" :class="['self-center font-bold text-sm', stResult.ok ? 'text-emerald-600' : 'text-rose-500']">{{ stResult.ok ? '✅' : '❌' }} 自检 {{ stResult.passed }}/{{ stResult.total }}</span>
+        </div>
+
+        <div v-if="demoLoading" class="text-slate-400 text-sm">跑真实 demo 中…（首次接真高德会稍慢）</div>
+
+        <div v-if="checklist.length" class="grid md:grid-cols-3 gap-3 mb-8">
+          <div v-for="c in checklist" :key="c.id" :class="['rounded-2xl border p-4', c.pass ? 'bg-emerald-50/50 border-emerald-100' : 'bg-rose-50/50 border-rose-100']">
+            <div class="flex items-center gap-2 mb-1"><span>{{ c.pass ? '✅' : '❌' }}</span><span class="text-[12px] font-bold text-slate-400">#{{ c.id }} · {{ c.scenario }}</span></div>
+            <div class="text-[13px] font-semibold text-slate-700 leading-snug">{{ c.title }}</div>
+            <div v-if="!c.pass" class="text-[11px] text-rose-400 mt-1">缺：{{ (c.missing||[]).join('、') }}</div>
+          </div>
+        </div>
+
+        <div v-if="demoText" class="rounded-[2rem] overflow-hidden shadow-2xl border border-slate-800 bg-slate-900/95 p-8">
+          <div class="font-mono text-[12px] leading-relaxed text-slate-300 max-h-[420px] overflow-y-auto no-scrollbar whitespace-pre-wrap">{{ demoText }}</div>
+        </div>
+      </div>
+
+    </main>
   </div>
 
-  <!-- 步骤4 -->
-  <div id="pExec" class="card hidden">
-    <div class="shd"><div class="no">4</div><div><h2>执行下单（含异常兜底）</h2>
-      <p>按依赖顺序真把单下掉，每步状态可见；满座换备选、超时重试、失败回滚补偿，GMV 同步跳动。</p></div></div>
-    <div class="exec" id="execOut"></div>
-    <div id="bizPanel"></div>
-    <div class="cardcta">
-      <button class="btn ok" id="cardBtn" style="display:none" onclick="openCard()">📲 打开可分享方案卡（递给老婆 / 发小张）</button>
-      <button class="btn ghost" onclick="goto(0)">↺ 换个目标重新来</button>
-    </div>
-    <div class="muted" id="cardHint" style="display:none;margin-top:6px">这就是"把手机递给老婆看"的那一屏——手机端友好、可一键复制分享文案。</div>
-  </div>
-</div>
+  <script>
+    const { createApp, ref, onMounted } = Vue;
+    const post = async (url, body) => (await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) })).json();
+    const get = async (url) => (await fetch(url)).json();
 
-<!-- ============ 演示 ============ -->
-<div id="paneD" class="hidden">
-  <div class="card lite">
-    <div class="muted" style="margin-bottom:10px">不想自己输？这里把两个内置场景从头跑给你看，左侧 9 条验收清单自动打勾。</div>
-    <div class="demohead">
-      <span class="muted">场景</span><div class="seg" id="scn"><button data-v="family" class="on">家庭</button><button data-v="friends">朋友局</button></div>
-      <span class="muted">冲突裁决</span><div class="seg" id="cf"><button data-v="suggestion" class="on">采纳建议</button><button data-v="alt">选另一方</button></div>
-      <button class="btn sm" onclick="runDemo()">▶ 运行</button>
-      <button class="btn ghost sm" onclick="runSelftest()">自检 selftest</button>
-    </div>
-  </div>
-  <div class="demowrap">
-    <div class="card lite"><div style="font-size:13px;color:var(--muted);font-weight:800;margin-bottom:6px">验收清单（PRD 9 条）</div>
-      <div id="checklist"></div><div id="score" style="font-weight:800;margin-top:8px"></div>
-      <div id="stRes" class="muted" style="margin-top:8px"></div></div>
-    <div class="card lite"><div class="demoview" id="demoView"><span class="muted">点「运行」开始</span></div></div>
-  </div>
-</div>
-</main>
+    createApp({
+      setup() {
+        const activeTab = ref('I');
+        const currentStep = ref(0);
+        const maxReached = ref(0);
+        const steps = ['输入意图', '方案确认', '协同反馈', '执行完毕'];
+        const gmv = ref(0);
+        const trust = ref(null);
+        const errorMsg = ref('');
+        const memorySummary = ref('');
 
-<script>
-function $(id){return document.getElementById(id);}
-function esc(s){return (s==null?'':''+s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
-function setGmv(v){$('gmv').textContent='¥'+Math.round(v||0);}
-function showTab(t){$('tabI').classList.toggle('on',t==='I');$('tabD').classList.toggle('on',t==='D');
-  $('paneI').classList.toggle('hidden',t!=='I');$('paneD').classList.toggle('hidden',t!=='D');}
-function setGoal(el){$('goal').value=el.textContent.trim();goto(0);$('goal').focus();}
-async function post(url,body){return await(await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})).json();}
+        const form = ref({ goal: '', partySize: 3, useLlm: true, exceptions: true });
+        const realData = ref(false);
+        const mapUrl = ref('');
+        const mapNonce = ref(0);
+        const refreshMap = () => {
+          if (realData.value && sid.value) { mapNonce.value++; mapUrl.value = '/api/map?sid=' + encodeURIComponent(sid.value) + '&t=' + mapNonce.value; }
+          else mapUrl.value = '';
+        };
+        const examples = ['今天下午带老婆孩子出去玩，别太远，老婆在减肥', '周末四个朋友小聚，想吃顿好的，有人无辣不欢'];
 
-let S={sid:null,party:3,edits:[],candidates:[],loc:null,area:null,pulled:0};
-let LOC_OK=false;  // 高德是否可用（决定要不要定位）
-function setLocLabel(txt,cls){const el=$('locLabel');el.textContent=txt;el.className=(cls||'muted');}
-function detectLoc(){
-  if(!LOC_OK){setLocLabel('📍 未配置高德，定位不可用（仍可演示）','muted');return;}
-  if(!navigator.geolocation){setLocLabel('📍 浏览器不支持定位，请手动输入地点','err');return;}
-  setLocLabel('📍 正在获取你的位置…','muted');
-  navigator.geolocation.getCurrentPosition(async pos=>{
-    const r=await post('/api/geo',{lng:pos.coords.longitude,lat:pos.coords.latitude});
-    if(r.ok){S.loc=r.loc;S.area=r.area;setLocLabel('📍 已定位：'+r.area+'（给你搜附近）','ok');}
-    else{setLocLabel('📍 '+(r.error||'定位失败')+'，可手动输入地点','err');}
-  },err=>{setLocLabel('📍 定位被拒绝/失败，请手动输入地点（如 国贸）','err');},
-  {enableHighAccuracy:true,timeout:8000,maximumAge:300000});
-}
-async function setLocManual(){
-  const a=$('locInput').value.trim();if(!a){alert('先输入一个地点');return;}
-  if(!LOC_OK){setLocLabel('📍 未配置高德，无法解析地点','err');return;}
-  setLocLabel('📍 正在解析「'+a+'」…','muted');
-  const r=await post('/api/geo',{address:a});
-  if(r.ok){S.loc=r.loc;S.area=r.area;setLocLabel('📍 已锁定：'+r.area+'（给你搜附近）','ok');}
-  else{setLocLabel('📍 '+(r.error||'解析失败'),'err');}
-}
-let cur=0,maxReached=0;
-const PANELS=['pGoal','pPlan','pReview','pExec'];
-function goto(n){if(n>maxReached)return;cur=n;
-  PANELS.forEach((id,i)=>$(id).classList.toggle('hidden',i!==n));
-  document.querySelectorAll('.node').forEach((el,i)=>{el.classList.toggle('on',i===cur);
-    el.classList.toggle('done',i<maxReached&&i!==cur);el.classList.toggle('reachable',i<=maxReached);});
-  window.scrollTo({top:0,behavior:'smooth'});}
-function reach(n){maxReached=Math.max(maxReached,n);goto(n);}
+        // 真实定位
+        const loc = ref('');
+        const area = ref('');
+        const locOk = ref(false);
+        const amapOn = ref(false);
+        const locStatus = ref('📍 正在获取你的位置…');
+        const addrInput = ref('');
+        const detectLoc = () => {
+          if (!amapOn.value) { locStatus.value = '📍 未配置高德 key，用内置示例库演示'; return; }
+          if (!navigator.geolocation) { locStatus.value = '📍 浏览器不支持定位，可手动输入地点'; return; }
+          locStatus.value = '📍 定位中…';
+          navigator.geolocation.getCurrentPosition(async pos => {
+            const r = await post('/api/geo', { lng: pos.coords.longitude, lat: pos.coords.latitude });
+            if (r.ok) { loc.value = r.loc; area.value = r.area; locOk.value = true; locStatus.value = '📍 已定位：' + r.area + '　（按你这儿搜附近）'; }
+            else { locStatus.value = '📍 ' + (r.error || '定位失败') + '，可手动输入地点'; }
+          }, () => { locStatus.value = '📍 定位被拒绝/失败，可手动输入地点（如 国贸）'; }, { timeout: 8000, enableHighAccuracy: true });
+        };
+        const lockAddr = async () => {
+          const a = addrInput.value.trim(); if (!a) return;
+          locStatus.value = '📍 锁定中…';
+          const r = await post('/api/geo', { address: a });
+          if (r.ok) { loc.value = r.loc; area.value = r.area; locOk.value = true; locStatus.value = '📍 已锁定：' + r.area + '　（按这儿搜附近）'; }
+          else { locStatus.value = '📍 ' + (r.error || '找不到该地点，换个说法'); }
+        };
+        onMounted(async () => {
+          try { const s = await get('/api/llm_status'); amapOn.value = !!(s.amap && s.amap.enabled); } catch (e) {}
+          if (amapOn.value) detectLoc(); else locStatus.value = '📍 未配置高德 key，用内置示例库演示';
+        });
 
-const DEC_ICON={choose_activity:'🎡',choose_restaurant:'🍽️',send_gift:'🎁',set_budget:'💰',set_return_time:'🕖',nap_window:'😴',child_safety:'🧒'};
-function confMeter(v){const pct=Math.round(v*100);const lvl=v>=0.7?'hi':v>=0.4?'mid':'lo';
-  const lab=v>=0.7?'有把握':v>=0.4?'中等':'没把握';
-  return `<div class="meter"><div class="meter-track"><i class="meter-fill ${lvl}" style="width:${pct}%"></i></div><span class="meter-lab ${lvl}">${v.toFixed(2)} · ${lab}</span></div>`;}
-function dispoBadge(d){return {auto:'<span class="pill auto">✅ 直接定</span>',suggest:'<span class="pill suggest">💡 给建议</span>',ask:'<span class="pill ask">❓ 停下来问</span>'}[d]||'';}
-function optFacts(o){if(!o)return'';let b=[];if(o.per_capita!=null)b.push('人均'+Math.round(o.per_capita));
-  if(o.child_friendly)b.push(o.kind==='restaurant'?'有儿童餐':'亲子');if(o.has_low_cal)b.push('低卡');
-  if(o.has_spicy_option)b.push('辣口');if(o.distance_km!=null)b.push(o.distance_km+'km');
-  if(o.allergens&&o.allergens.length)b.push('含'+o.allergens.join('/'));return b.length?'（'+b.join('·')+'）':'';}
+        const sid = ref('');
+        const isAnalyzing = ref(false);
+        const planData = ref(null);
+        const answers = ref({});
+        const suggestions = ref({});
+        const isSubmittingAnswers = ref(false);
 
-function decCard(d,interactive,i){
-  const resolved=(d.status==='confirmed'||d.status==='done');
-  const ic=DEC_ICON[d.type]||'🤖';
-  const badge=resolved?'<span class="pill ok">✅ 你已拍板</span>':dispoBadge(d.disposition);
-  const delay=(typeof i==='number')?` style="animation-delay:${(i*0.09).toFixed(2)}s"`:'';
-  let h=`<div class="dcard reveal ${resolved?'done':d.disposition}" data-dec="${d.id}"${delay}>`;
-  // 情感高光：送礼这条做成 AI 主动开口的对话气泡（路演记忆点）
-  if(d.type==='send_gift')
-    h+=`<div class="aispeak">💬 “我注意到你提到 ta 最近在减肥——高热量蛋糕可能适得其反，我把礼物换成了<b>一束花 + 一张她一直想看的展的票</b>。更贴心、也不破坏她的计划。<b>要这样吗？</b>”<span class="aitag">这是建议，不是替你定 · 分寸感由你拍板</span></div>`;
-  h+=`<div class="dhead"><span class="dic">${ic}</span><span class="dtit">${esc(d.description)}</span>${badge}</div>`;
-  if(d.options&&d.options.length&&d.type==='choose_restaurant')
-    h+=`<div class="chips">${d.options.slice(0,6).map(o=>`<span class="chip${d.chosen&&o.label===d.chosen.label?' on':''}">${esc(o.label)}${optFacts(o)}</span>`).join('')}</div>`;
-  if(d.chosen)h+=`<div class="chosen">→ 选定 <b>${esc(d.chosen.label)}</b></div>`;
-  h+=confMeter(d.confidence);
-  h+=`<div class="basis">依据：${esc(d.confidence_basis)}</div>`;
-  h+=`<div class="reason">${esc(d.reasoning)}</div>`;
-  if(d.counterfactual)h+=`<div class="cf">🔮 如果我没拦你：${esc(d.counterfactual)}</div>`;
-  (d.history||[]).forEach(x=>h+=`<div class="hist">↻ ${esc(x)}</div>`);
-  if(interactive&&!resolved&&d.disposition==='ask')
-    h+=`<div class="ask"><div class="ask-q">❓ 需要你回答</div><input class="ask-input fld" data-dec="${d.id}" placeholder="如：人均120以内 / 19:30前到家"></div>`;
-  if(interactive&&!resolved&&d.disposition==='suggest')
-    h+=`<label class="sug"><input type="checkbox" class="sug-check" data-dec="${d.id}" checked> 采纳这条建议</label>`;
-  return h+'</div>';
-}
-function summaryBanner(decs){
-  const a=decs.filter(d=>d.disposition==='auto').length;
-  const s=decs.filter(d=>d.disposition==='suggest').length;
-  const q=decs.filter(d=>d.disposition==='ask').length;
-  return `<div class="stat green"><b>${a}</b><span>✅ 直接定</span></div><div class="stat amber"><b>${s}</b><span>💡 给建议</span></div><div class="stat red"><b>${q}</b><span>❓ 想问你</span></div>`;
-}
+        const shareUrl = ref('');
+        const copied = ref(false);
+        const edits = ref([]);
+        const isReviewing = ref(false);
+        const reviewResult = ref(null);
 
-function renderTimeline(tl){
-  if(!tl||!tl.length)return '';
-  const rows=tl.map(s=>{
-    const span=(s.end&&s.end!==s.start)?esc(s.start)+'–'+esc(s.end):esc(s.start);
-    return `<div class="tl-row"><span class="tl-time">${span}</span><span class="tl-act">${esc(s.title)}</span></div>`;
-  }).join('');
-  return '<div class="tl-title">⏱ 行程时间线（随你定的到家时间自动倒排）</div>'+rows;
-}
-function renderQuadrant(decs){
-  if(!decs||!decs.length)return '';
-  const DI={auto:{c:'#12a05a',t:'直接定',e:'✅'},suggest:{c:'#cf7a09',t:'给建议',e:'💡'},ask:{c:'#e23b5a',t:'问你',e:'❓'}};
-  // 画布：x=把握(0→1)，y=代价(低在下、高在上)
-  const W=340,H=215,L=34,R=12,T=22,B=40;
-  const xc=c=>L+(W-L-R)*Math.max(.04,Math.min(.96,c||0));
-  const yc=cost=>({low:H-B-14,mid:(T+H-B)/2,high:T+14}[cost]??(T+H-B)/2);
-  // 三色分区背景（和规则一致：代价高→问；代价低且把握高→做；其余→建议），淡色铺底
-  const midY=(T+H-B)/2, x40=xc(0.4), x70=xc(0.7);
-  const zones=`
-    <rect x="${L}" y="${T}" width="${W-L-R}" height="${midY-T}" fill="#e23b5a" opacity=".07"/>
-    <rect x="${L}" y="${midY}" width="${x40-L}" height="${H-B-midY}" fill="#e23b5a" opacity=".07"/>
-    <rect x="${x40}" y="${midY}" width="${x70-x40}" height="${H-B-midY}" fill="#cf7a09" opacity=".08"/>
-    <rect x="${x70}" y="${midY}" width="${W-R-x70}" height="${H-B-midY}" fill="#12a05a" opacity=".10"/>
-    <text x="${W-R-4}" y="${T+16}" text-anchor="end" font-size="10" fill="#e23b5a" opacity=".8">代价高 → 一律先问你</text>
-    <text x="${W-R-4}" y="${H-B-6}" text-anchor="end" font-size="10.5" fill="#12a05a" opacity=".9">把握高·代价低 → 放心替你定</text>
-    <text x="${L+4}" y="${H-B-6}" font-size="10" fill="#e23b5a" opacity=".8">没把握 → 问你</text>`;
-  let dots='';
-  decs.forEach((d,i)=>{
-    const m=DI[d.disposition]||DI.suggest, x=xc(d.confidence), y=yc(d.cost)+(i%2?8:-8);
-    dots+=`<circle cx="${x}" cy="${y}" r="9.5" fill="${m.c}"/><text x="${x}" y="${y+3.5}" text-anchor="middle" font-size="10.5" font-weight="700" fill="#fff">${i+1}</text>`;
-  });
-  // 下方清单：每个编号 → 决定名 + 处置（解决"不知道在讲什么"）
-  const list=decs.map((d,i)=>{const m=DI[d.disposition]||DI.suggest;
-    return `<div class="qrow"><span class="qno" style="background:${m.c}">${i+1}</span><span class="qname">${esc(d.description)}</span><span class="qd" style="color:${m.c}">${m.e} ${m.t}</span></div>`;}).join('');
-  return `<div class="quad">
-    <div class="quad-h">🧠 我怎么决定「该不该替你做主」</div>
-    <div class="quad-sub">越往右我越有把握、越往上代价越大。<b style="color:var(--green)">右下角</b>放心替你定，<b style="color:var(--red)">越往左上</b>越要先问你。</div>
-    <svg viewBox="0 0 ${W} ${H}" class="quad-svg">
-      ${zones}
-      <rect x="${L}" y="${T}" width="${W-L-R}" height="${H-T-B}" fill="none" stroke="#e3e6f0" rx="6"/>
-      <text x="${L}" y="${H-12}" font-size="10.5" fill="#8a90a4">← 没把握　　我有多大把握　　有把握 →</text>
-      <text x="9" y="${T+12}" font-size="10.5" fill="#8a90a4" transform="rotate(-90 9 ${(T+H-B)/2})">代价 低→高</text>
-      ${dots}
-    </svg>
-    <div class="qlist">${list}</div>
-  </div>`;
-}
-const AUTO_LV=['conservative','balanced','bold'];
-const AUTO_TXT={conservative:'保守·多问我',balanced:'平衡',bold:'大胆·多替我定'};
-function levelToSlider(l){return ({conservative:0,balanced:1,bold:2})[l]??1;}
-function renderTrust(trust){
-  if(!trust){$('trustBar').classList.add('hidden');return;}
-  const lv=trust.level||'balanced',pct=Math.max(4,Math.min(100,trust.score||0));
-  let unlock='';
-  if(trust.unlocked&&trust.unlocked.length)
-    unlock=`<div class="trust-unlock">🔓 信任已建立——这次我直接替你定了：${trust.unlocked.map(u=>'<b>'+esc(u.label)+'</b>').join('、')}（你确认得越多，我越敢做主；错了随时撤）</div>`;
-  $('trustBar').innerHTML=`<div class="trust-top"><span>🤝 信任账户 <b>${trust.score||0}</b><span style="color:var(--muted);font-size:12px">/100</span></span><span class="trust-lv">${esc(trust.label||'')}</span></div>
-    <div class="trust-track"><div class="trust-fill" style="width:${pct}%"></div></div>${unlock}`;
-  $('trustBar').classList.remove('hidden');
-  $('autonomy').value=levelToSlider(lv);$('autonomyLabel').textContent=AUTO_TXT[lv];  // 旋钮同步到挣得的自主度
-}
-async function setAutonomy(v){
-  const level=AUTO_LV[+v]||'balanced';
-  $('autonomyLabel').textContent=AUTO_TXT[level];
-  if(!S.sid)return;
-  const r=await post('/api/autonomy',{sid:S.sid,level});
-  if(!r.ok)return;
-  $('summary').innerHTML=summaryBanner(r.plan.decisions);
-  $('decisions').innerHTML=r.plan.decisions.map((d,i)=>decCard(d,true,i)).join('');
-  $('quadrant').innerHTML=renderQuadrant(r.plan.decisions);
-}
-function showMap(box,legend){
-  if(!S.sid){$(box).innerHTML='';return;}
-  const leg=legend||'家 → 玩 → 吃';
-  $(box).innerHTML=`<div class="mapwrap"><img class="mapimg" src="/api/map?sid=${encodeURIComponent(S.sid)}&t=${(new Date()).getTime()}" alt="路线图" onerror="var w=this.closest('.mapwrap');if(w)w.style.display='none'"><div class="mapcap">🗺️ 真实路线（高德实景·可当场搜证）　${leg}</div></div>`;
-}
-function mapLegend(plan){
-  const f=t=>plan.decisions.find(d=>d.type===t);
-  const act=f('choose_activity'),rest=f('choose_restaurant');
-  let out=['<b>①</b> 家（出发）'],n=2;
-  if(act&&act.chosen){out.push(`<b>${n}</b> 玩：${esc(act.chosen.label)}`);n++;}
-  if(rest&&rest.chosen){out.push(`<b>${n}</b> 吃：${esc(rest.chosen.label)}`);n++;}
-  return out.join('　·　');
-}
-async function forgetPrefs(){await post('/api/forget',{});$('memoryBanner').classList.add('hidden');}
-function renderTips(tips){
-  if(!tips||!tips.length)return '';
-  return '<div class="tips"><div class="tips-h">🤝 出发前，几句贴心提醒</div>'+
-    tips.map(t=>`<div class="tip"><span class="tip-i">${esc(t.icon||'·')}</span><span>${esc(t.text)}</span></div>`).join('')+'</div>';
-}
-function replanBannerHtml(plan){
-  const f=t=>plan.decisions.find(d=>d.type===t);
-  const rest=f('choose_restaurant'),bdg=f('set_budget'),ret=f('set_return_time');
-  let head='✅ 已按你的回答重新规划';
-  if(rest&&rest.chosen){head+='：餐厅 → <b>'+esc(rest.chosen.label)+'</b>'+(rest.chosen.price?'（人均 ¥'+Math.round(rest.chosen.price)+'）':'');}
-  let sub=[];
-  if(bdg&&bdg.chosen)sub.push('预算：'+esc(bdg.chosen.label));
-  if(ret&&ret.chosen)sub.push('到家：'+esc(ret.chosen.label));
-  return head+(sub.length?'<small>'+sub.join('　·　')+'　→　餐厅与行程时间线已随之更新</small>':'');
-}
+        const isExecuting = ref(false);
+        const execLogs = ref([]);
+        const business = ref(null);
+        const hasCard = ref(false);
 
-async function start(){
-  if(!$('goal').value.trim()){alert('先写一句你的目标');return;}
-  const useLlm=$('useLlm').checked;
-  $('startBtn').disabled=true;$('startBtn').textContent=useLlm?'查真实数据中…':'分析中…';
-  const r=await post('/api/start',{goal:$('goal').value,party_size:+$('party').value,exceptions:$('exc').checked,use_llm:useLlm,loc:S.loc||''});
-  $('startBtn').disabled=false;$('startBtn').textContent='✨ 帮我安排';
-  if(!r.ok){alert(r.error);return;}
-  S.sid=r.sid;S.party=r.party;S.edits=[];$('party').value=r.party;
-  const src=(r.source&&r.source.indexOf('高德')>=0)?'<span class="pill ok">🌐 候选来自高德真实 POI · 评委可当场搜证</span>'
-    :(r.source==='AI'?'<span class="pill ok">🧠 候选来自 AI 实时生成</span>':'<span class="muted">候选来自本地真实连锁库</span>');
-  $('src').innerHTML=src;
-  $('summary').innerHTML=summaryBanner(r.plan.decisions);
-  $('known').innerHTML='<span class="known">✓ 我读懂的：</span>'+(r.known.length?r.known.map(k=>'<br>　· '+esc(k)).join(''):'（这句话没给明确约束）');
-  $('unknown').innerHTML='<span class="unknown">? 我还不知道的（不替你乱填）：</span>'+(r.unknown.length?r.unknown.map(k=>'<br>　· '+esc(k)).join(''):'无');
-  $('decisions').innerHTML=r.plan.decisions.map((d,i)=>decCard(d,true,i)).join('');
-  $('quadrant').innerHTML=renderQuadrant(r.plan.decisions);
-  $('autonomy').value=1;$('autonomyLabel').textContent='平衡';
-  renderTrust(r.trust);   // 信任账户：进度条 + 解锁提示 + 旋钮同步到已挣得的自主度
-  showMap('mapbox',mapLegend(r.plan));
-  $('timeline').innerHTML=renderTimeline(r.plan.timeline);
-  $('tips').innerHTML=renderTips(r.plan.tips);
-  $('replanBanner').classList.add('hidden');
-  // 偏好记忆：记得你→横幅提示 + 预填"停下来问"的输入框（仍由你确认，不静默填）
-  const mem=r.memory&&r.memory.summary;
-  if(mem){
-    $('memoryBanner').innerHTML=`🧠 我记得你：<b>${esc(mem)}</b> —— 这次先按这个预填好了，<b>确认或改都行</b><span class="forget" onclick="forgetPrefs()">忘记我的偏好</span>`;
-    $('memoryBanner').classList.remove('hidden');
-    const p=(r.memory&&r.memory.prefs)||{};
-    r.plan.decisions.forEach(d=>{
-      const inp=document.querySelector('.ask-input[data-dec="'+d.id+'"]');
-      if(!inp)return;
-      if(d.type==='set_budget'&&p.budget_per_capita)inp.value='人均 '+Math.round(p.budget_per_capita)+' 以内';
-      if(d.type==='set_return_time'&&p.return_time)inp.value=p.return_time;
-    });
-  }else $('memoryBanner').classList.add('hidden');
-  setGmv(r.plan.gmv_estimate);
-  reach(1);
-}
+        // 演示验收
+        const demoLoading = ref(false);
+        const demoText = ref('');
+        const checklist = ref([]);
+        const stLoading = ref(false);
+        const stResult = ref(null);
 
-async function submitAnswers(){
-  const answers={},suggestions={};
-  document.querySelectorAll('.ask-input').forEach(i=>{if(i.value.trim())answers[i.dataset.dec]=i.value.trim();});
-  document.querySelectorAll('.sug-check').forEach(c=>suggestions[c.dataset.dec]=c.checked);
-  const r=await post('/api/answer',{sid:S.sid,answers,suggestions});
-  if(!r.ok){alert(r.error);return;}
-  $('decisions').innerHTML=r.plan.decisions.map((d,i)=>decCard(d,false,i)).join('');
-  $('summary').innerHTML='<div class="stat green" style="flex:1"><b>✓</b><span>方案已按你的回答重新规划</span></div>';
-  let banner=replanBannerHtml(r.plan);
-  if(r.trust&&r.trust.delta>0)
-    banner+=`<small>🤝 信任 +${r.trust.delta} → 现在 ${r.trust.score}/100（${esc(r.trust.label)}）。你确认得越多，下次我越敢替你定。</small>`;
-  $('timeline').innerHTML=renderTimeline(r.plan.timeline);
-  $('tips').innerHTML=renderTips(r.plan.tips);
-  $('replanBanner').innerHTML=banner;$('replanBanner').classList.remove('hidden');
-  setGmv(r.plan.gmv_estimate);
-  S.candidates=r.candidates||[];S.pulled=0;
-  $('reviewSummary').innerHTML='<div class="replan">'+banner+'</div>';
-  $('reviewTimeline').innerHTML=renderTimeline(r.plan.timeline);
-  $('reviewTips').innerHTML=renderTips(r.plan.tips);
-  buildQuickEdits();
-  const sel=$('edRest');sel.innerHTML=S.candidates.map(o=>`<option value="${o.id}">${esc(o.label)}${optFacts(o)}</option>`).join('');
-  $('autoMerged').innerHTML='';$('conflicts').innerHTML='';$('resolveRow').classList.add('hidden');$('v2Box').classList.add('hidden');
-  reach(2);
-}
+        const restDecision = () => planData.value ? planData.value.decisions.find(d => d.type === 'choose_restaurant') : null;
+        const candidates = () => { const r = restDecision(); return r && r.options ? r.options : []; };
 
-function buildQuickEdits(){
-  const c=S.candidates;const box=$('quickEdits');let b=[];
-  const near=c.slice().sort((x,y)=>(x.distance_km??99)-(y.distance_km??99))[0];
-  const far=c.slice().sort((x,y)=>(y.distance_km??0)-(x.distance_km??0))[0];
-  const sea=c.find(o=>o.allergens&&o.allergens.includes('海鲜'));
-  if(near)b.push(`<button class="btn ghost sm" onclick="quickEdit('老婆',0.9,'restaurant','${near.id}','换最近的')">👩 老婆嫌远 → 换最近「${esc(near.label)}」</button>`);
-  if(sea)b.push(`<button class="btn ghost sm" onclick="quickEdit('朋友甲',0.5,'restaurant','${sea.id}','想吃海鲜')">🧑 朋友想吃「${esc(sea.label)}」</button>`);
-  else if(far&&far!==near)b.push(`<button class="btn ghost sm" onclick="quickEdit('朋友甲',0.5,'restaurant','${far.id}','')">🧑 朋友想换「${esc(far.label)}」</button>`);
-  b.push(`<button class="btn ghost sm" onclick="quickEdit('朋友乙',0.5,'constraint','我对海鲜过敏')">➕ 有人海鲜过敏</button>`);
-  b.push(`<button class="btn ghost sm" onclick="quickEdit('阿强',0.55,'constraint','我无辣不欢')">➕ 有人无辣不欢</button>`);
-  box.innerHTML=b.join('');
-}
-function quickEdit(author,weight,type,val,note){
-  let e={author,weight,type};
-  if(type==='constraint')e.constraint=val;
-  else{e.after_id=val;const o=S.candidates.find(x=>x.id===val);e._label=o?o.label:val;e.note=note||'';}
-  S.edits.push(e);renderEdits();$('reviewBtn').disabled=false;
-}
-function edTypeChange(){const c=$('edType').value==='constraint';$('edConstraint').classList.toggle('hidden',!c);$('edRest').classList.toggle('hidden',c);}
-function addEdit(){
-  const name=$('edAuthor').value.trim();if(!name){alert('先填"谁"改的');return;}
-  const w=+$('edWeight').value,type=$('edType').value;let e={author:name,weight:w,type};
-  if(type==='constraint'){e.constraint=$('edConstraint').value.trim();if(!e.constraint){alert('填写约束内容');return;}}
-  else{const o=S.candidates.find(x=>x.id===$('edRest').value);e.after_id=$('edRest').value;e._label=o?o.label:e.after_id;}
-  S.edits.push(e);renderEdits();$('edAuthor').value='';$('edConstraint').value='';$('reviewBtn').disabled=false;
-}
-function renderEdits(){
-  $('editList').innerHTML=S.edits.length?('<div class="muted" style="margin:8px 0 2px">已加入的改动：</div>'+S.edits.map((e,i)=>`<div class="editline"><span class="who">${esc(e.author)}</span>
-   <span class="muted">权重 ${e.weight}</span> ${e.type==='constraint'?'加约束「'+esc(e.constraint)+'」':'换餐厅 → '+esc(e._label)}
-   <span class="eg2" onclick="delEdit(${i})">删除</span></div>`).join('')):'';
-}
-function delEdit(i){S.edits.splice(i,1);renderEdits();if(!S.edits.length)$('reviewBtn').disabled=true;}
+        // ---- 步骤1：真实分析 ----
+        const startPlan = async () => {
+          errorMsg.value = '';
+          if (!form.value.goal.trim()) { errorMsg.value = '先说一句你的目标吧'; return; }
+          isAnalyzing.value = true;
+          try {
+            const r = await post('/api/start', { goal: form.value.goal, party_size: form.value.partySize, exceptions: form.value.exceptions, use_llm: form.value.useLlm, loc: loc.value || '' });
+            if (!r.ok) { errorMsg.value = r.error || '分析失败'; isAnalyzing.value = false; return; }
+            sid.value = r.sid;
+            planData.value = r.plan;
+            trust.value = r.trust;
+            realData.value = !!r.llm_used;
+            refreshMap();
+            gmv.value = r.plan.gmv_estimate || 0;
+            memorySummary.value = (r.memory && r.memory.summary) || '';
+            answers.value = {}; suggestions.value = {};
+            planData.value.decisions.forEach(d => { if (d.disposition === 'suggest') suggestions.value[d.id] = true; });
+            reach(1);
+            window.scrollTo({ top: 0, behavior: 'smooth' });
+          } catch (e) { errorMsg.value = '服务异常：' + e; }
+          isAnalyzing.value = false;
+        };
 
-let SHARE_POLL=null;
-async function shareLink(){
-  if(!S.sid){alert('请先生成方案');return;}
-  const r=await(await fetch('/api/shareurl?sid='+encodeURIComponent(S.sid))).json();
-  if(!r.ok){alert(r.error);return;}
-  $('shareUrl').value=r.url;$('shareRow').classList.remove('hidden');
-  if(!SHARE_POLL)SHARE_POLL=setInterval(pullEdits,4000);
-  pullEdits();
-}
-function copyShare(){const i=$('shareUrl');i.select();
-  if(navigator.clipboard)navigator.clipboard.writeText(i.value);
-  $('shareRecv').textContent='链接已复制，发给朋友吧';}
-async function pullEdits(){
-  if(!S.sid)return;
-  const r=await(await fetch('/api/edits?sid='+encodeURIComponent(S.sid))).json();
-  if(!r.ok)return;
-  const all=r.edits||[];const fresh=all.slice(S.pulled||0);
-  if(fresh.length){fresh.forEach(e=>S.edits.push(e));S.pulled=all.length;
-    renderEdits();$('reviewBtn').disabled=false;}
-  $('shareRecv').textContent='朋友已提交 '+all.length+' 条改动'+(all.length?'（已并入下方）':'');
-}
-async function runReview(){
-  const r=await post('/api/review',{sid:S.sid,edits:S.edits});
-  if(!r.ok){alert(r.error);return;}
-  $('autoMerged').innerHTML='<div class="sec-title">合并结果</div>'+r.auto_merged.map(e=>{
-    const txt=e.constraint?('「'+esc(e.constraint)+'」'+esc(e.merged_note||'')):('餐厅→'+esc(e.label||''));
-    return e.actionable!==false?`<div class="merge">✅ 自动合并（无争议）：${esc(e.author)} 的 ${txt}</div>`
-      :`<div class="noted">📝 已记录（无需打扰）：${esc(e.author)} 的 ${txt}</div>`;}).join('');
-  $('conflicts').innerHTML=(r.conflicts.length?'<div class="sec-title">撞车待你裁决</div>':'')+r.conflicts.map(c=>{
-    let h=`<div class="conflict"><div style="color:var(--amber);font-weight:800">⚠️ ${ {choose_restaurant:'餐厅'}[c.target]||c.target } 撞车了</div>`;
-    h+=`<div class="sug">🤖 我的建议：采纳 ${esc(c.suggestion_owner)}的 ${esc(c.suggestion?c.suggestion.label:'')}</div>`;
-    h+=`<div class="why">${esc(c.reason)}</div>`;
-    c.competing.forEach(e=>{const isSug=e.edit_id===c.suggested_edit_id;
-      h+=`<label class="opt"><input type="radio" name="cf${c.idx}" value="${e.edit_id}" ${isSug?'checked':''}> 采纳 <b>${esc(e.author)}</b> 的 ${esc(e.label)}（权重 ${e.weight}）${isSug?' &nbsp;← 我建议这个':''}</label>`;});
-    h+=`<label class="opt"><input type="radio" name="cf${c.idx}" value="none"> 都不采纳，保持原样</label>`;
-    return h+'</div>';}).join('');
-  if(!r.conflicts.length)$('conflicts').innerHTML+='<div class="muted">没有撞车——所有改动都被无争议自动合并了，可直接生成新版。</div>';
-  $('resolveRow').classList.remove('hidden');
-  $('resolveRow').scrollIntoView({behavior:'smooth',block:'center'});
-}
-async function applyResolve(){
-  const resolutions={};document.querySelectorAll('#conflicts .conflict').forEach((box,i)=>{
-    const sel=box.querySelector('input[type=radio]:checked');resolutions[i]=sel?sel.value:'suggestion';});
-  const r=await post('/api/resolve',{sid:S.sid,resolutions});
-  if(!r.ok){alert(r.error);return;}
-  $('v2Box').classList.remove('hidden');$('v2Ver').textContent='(v'+r.plan.version+')';
-  $('v2Decisions').innerHTML=r.plan.decisions.map((d,i)=>decCard(d,false,i)).join('')+renderTimeline(r.plan.timeline)+renderTips(r.plan.tips);
-  setGmv(r.plan.gmv_estimate);$('v2Box').scrollIntoView({behavior:'smooth',block:'center'});
-}
+        const forgetMe = async () => { await post('/api/forget', {}); memorySummary.value = ''; };
 
-async function execute(){
-  const r=await post('/api/execute',{sid:S.sid});
-  if(!r.ok){alert(r.error);return;}
-  $('execOut').innerHTML=r.text.split('\n').map(line=>{const t=line.trim();
-    let cls='';if(/^\[\d+\/\d+\]/.test(t))cls='e-step';else if(t.startsWith('✅'))cls='e-ok';
-    else if(t.startsWith('⚠️'))cls='e-warn';else if(t.startsWith('❌'))cls='e-fail';
-    else if(t.startsWith('↳')||t.startsWith('💰')||t.startsWith('👤'))cls='e-note';
-    return `<div class="${cls}">${esc(line)}</div>`;}).join('');
-  animateGmv(r.gmv_trace,r.gmv);
-  $('bizPanel').innerHTML=renderBusiness(r.business);
-  if(r.has_card){$('cardBtn').style.display='';$('cardHint').style.display='';}
-  reach(3);
-}
-function renderBusiness(b){
-  if(!b||!b.sku_count)return '';
-  const skus=b.items.map(it=>`<span class="biz-sku">${esc(it.label)} <b>¥${it.amt}</b></span>`).join('');
-  return `<div class="biz">
-    <div class="biz-h">💰 这一单的商业价值（一句话撬动的连带消费）</div>
-    <div class="biz-big"><b>一句话</b> → 连带 <b class="biz-n">${b.sku_count}</b> 个 SKU，撬动 <b class="biz-n">¥${b.gmv}</b></div>
-    <div class="biz-skus">${skus}</div>
-    <div class="biz-cmp">对比"只点一份外卖"（约 ¥${b.baseline}）：单次会话价值 <b>↑ ${b.multiple}×</b>　·　客单 ¥${b.per_capita}/人</div>
-    <div class="biz-note">📈 这就是<b>连带率 / 客单价</b>——美团天天在测、想提的核心指标，一句话直接抬上去。而<b>信任分 ${b.trust}/100</b> 把一次性交易变成"越用越离不开"的<b>留存资产</b>。全品类供给 × 即时履约的闭环，只有美团生态跑得通。</div>
-  </div>`;
-}
-function openCard(){window.open('/api/card?sid='+encodeURIComponent(S.sid),'_blank');}
-function animateGmv(trace,final){const seq=(trace&&trace.length)?trace:[final||0];let k=0;
-  (function tick(){setGmv(seq[k]||0);k++;if(k<seq.length)setTimeout(tick,260);else setGmv(final||0);})();}
+        // ---- 步骤2：真实回答 + 重新规划 ----
+        const submitAnswers = async () => {
+          if (isSubmittingAnswers.value) return;
+          isSubmittingAnswers.value = true;
+          try {
+            const r = await post('/api/answer', { sid: sid.value, answers: answers.value, suggestions: suggestions.value });
+            if (r.ok) {
+              planData.value = r.plan;
+              gmv.value = r.plan.gmv_estimate || gmv.value;
+              if (r.trust) trust.value = r.trust;
+              refreshMap();
+              await loadShare();
+              reach(2);
+              window.scrollTo({ top: 0, behavior: 'smooth' });
+            } else { errorMsg.value = r.error; }
+          } catch (e) { errorMsg.value = '' + e; }
+          isSubmittingAnswers.value = false;
+        };
 
-/* 一键演示 */
-let scenario='family',conflict='suggestion';
-function seg(id,cb){document.querySelectorAll('#'+id+' button').forEach(b=>b.onclick=()=>{
-  document.querySelectorAll('#'+id+' button').forEach(x=>x.classList.remove('on'));b.classList.add('on');cb(b.dataset.v);});}
-seg('scn',v=>{scenario=v;runDemo();});seg('cf',v=>{conflict=v;runDemo();});
-async function runDemo(){
-  $('demoView').textContent='运行中…';
-  const r=await(await fetch(`/api/run?scenario=${scenario}&conflict=${conflict}&loc=${encodeURIComponent(S.loc||'')}`)).json();
-  if(!r.ok){$('demoView').textContent='出错：'+(r.error||'');return;}
-  renderChecklist(r.checklist);setGmv(r.gmv);
-  $('demoView').innerHTML=r.text.split('\n').map(line=>{const t=line.trim();if(!t)return'';
-    if(t.includes('║')){const x=t.replace(/[║╔╗╚╝═]/g,'').trim();return x?`<div class="sec-title">${esc(x)}</div>`:'';}
-    if(/^[╔╚╗╝═]+$/.test(t))return'';
-    let cls='';if(t.startsWith('🤖'))cls='e-step';else if(t.startsWith('✅'))cls='e-ok';
-    else if(t.startsWith('⚠️')||t.startsWith('💡'))cls='e-warn';else if(t.startsWith('❌'))cls='e-fail';
-    else if(t.startsWith('↳')||t.startsWith('👤')||t.startsWith('置信度')||t.startsWith('代价'))cls='e-note';
-    return `<div data-l class="${cls}">${esc(line)}</div>`;}).join('');
-}
-function renderChecklist(items){const box=$('checklist');box.innerHTML='';let p=0;
-  items.forEach(it=>{if(it.pass)p++;const d=document.createElement('div');d.className='chk '+(it.pass?'pass':'fail');
-    d.innerHTML=`<div class="ic">${it.pass?'✅':'❌'}</div><div class="t">[${it.id}] ${esc(it.title)}${it.pass?'':'<small>缺：'+esc((it.missing||[]).join('、'))+'</small>'}</div>`;
-    d.onclick=()=>{const ev=it.evidence||'';const hit=[...document.querySelectorAll('#demoView [data-l]')].find(x=>x.textContent.includes(ev.slice(0,16)));
-      if(hit){hit.scrollIntoView({block:'center'});hit.classList.remove('flash');void hit.offsetWidth;hit.classList.add('flash');}};
-    box.appendChild(d);});
-  $('score').textContent=p+'/'+items.length+' 通过 '+(p===items.length?'✅':'');$('score').style.color=p===items.length?'var(--green)':'var(--amber)';}
-async function runSelftest(){$('stRes').textContent='自检运行中…';const r=await(await fetch('/api/selftest')).json();
-  $('stRes').innerHTML=(r.ok?'✅':'❌')+' selftest '+r.passed+'/'+r.total+' 通过';}
-edTypeChange();
-(async()=>{try{const s=await(await fetch('/api/llm_status')).json();
-  const amap=s.amap&&s.amap.enabled, ai=s.enabled;
-  LOC_OK=!!amap;
-  if(amap||ai){$('useLlm').checked=true;$('useLlm').disabled=false;
-    let bits=[];if(amap)bits.push('高德真实 POI');if(ai)bits.push('AI');
-    $('llmStatus').innerHTML='<span class="statuspill">● 已接入 '+bits.join(' + ')+'</span>';}
-  else{$('useLlm').checked=false;$('useLlm').disabled=true;
-    $('llmStatus').innerHTML='<span class="muted">未配置（走本地库）</span>';}
-  if(amap){detectLoc();}                       // 有高德就自动尝试定位
-  else{setLocLabel('📍 未配置高德 key，定位不可用（仍可用本地库演示）','muted');$('locInput').disabled=true;}
-}catch(e){$('useLlm').disabled=true;setLocLabel('📍 定位不可用','muted');}})();
-</script>
-</body></html>
+        // ---- 步骤3：真实评审 ----
+        const loadShare = async () => { try { const r = await get('/api/shareurl?sid=' + encodeURIComponent(sid.value)); if (r.ok) shareUrl.value = r.url; } catch (e) {} };
+        const copyShare = () => { navigator.clipboard && navigator.clipboard.writeText(shareUrl.value); copied.value = true; setTimeout(() => copied.value = false, 1500); };
+
+        const pushEdit = (e) => { if (!edits.value.find(x => x.author === e.author && x.type === e.type && x._label === e._label)) edits.value.push(e); };
+        const wifeFar = () => { const c = candidates().slice().sort((a, b) => (a.distance_km || 99) - (b.distance_km || 99))[0]; if (c) pushEdit({ author: '妻子', weight: 0.9, type: 'restaurant', after_id: c.id, _label: c.label }); };
+        const friendUpscale = () => { const c = candidates().slice().sort((a, b) => (b.per_capita || 0) - (a.per_capita || 0))[0]; if (c) pushEdit({ author: '朋友', weight: 0.5, type: 'restaurant', after_id: c.id, _label: c.label }); };
+        const allergy = () => pushEdit({ author: '好友A', weight: 0.6, type: 'constraint', constraint: '我对海鲜过敏', _label: '海鲜过敏' });
+
+        const runReview = async () => {
+          if (!edits.value.length) return;
+          isReviewing.value = true;
+          try {
+            const payload = edits.value.map(e => e.type === 'constraint'
+              ? { author: e.author, weight: e.weight, type: 'constraint', constraint: e.constraint }
+              : { author: e.author, weight: e.weight, type: 'restaurant', after_id: e.after_id, note: '' });
+            const r = await post('/api/review', { sid: sid.value, edits: payload });
+            if (r.ok) { reviewResult.value = { auto_merged: r.auto_merged, conflicts: r.conflicts }; planData.value = r.merged_plan; gmv.value = r.merged_plan.gmv_estimate || gmv.value; refreshMap(); }
+            else { errorMsg.value = r.error; }
+          } catch (e) { errorMsg.value = '' + e; }
+          isReviewing.value = false;
+        };
+
+        const resolveAndExecute = async () => {
+          isReviewing.value = true;
+          try {
+            const resolutions = {};
+            (reviewResult.value.conflicts || []).forEach((c, i) => resolutions[String(i)] = 'suggestion');
+            const r = await post('/api/resolve', { sid: sid.value, resolutions });
+            if (r.ok) { planData.value = r.plan; gmv.value = r.plan.gmv_estimate || gmv.value; }
+          } catch (e) {}
+          isReviewing.value = false;
+          await goExecute();
+        };
+
+        // ---- 步骤4：真实执行 ----
+        const goExecute = async () => {
+          reach(3);
+          window.scrollTo({ top: 0, behavior: 'smooth' });
+          isExecuting.value = true;
+          execLogs.value = [];
+          try {
+            const r = await post('/api/execute', { sid: sid.value });
+            if (!r.ok) { execLogs.value = ['❌ ' + (r.error || '执行失败')]; isExecuting.value = false; return; }
+            const lines = (r.text || '').split('\n');
+            // 逐行揭示，营造"在替你跑腿"的过程感（已美化成浅色行、隐藏内部ID/分隔线）
+            let i = 0;
+            const tick = () => {
+              if (i < lines.length) {
+                const h = prettyExec(lines[i]); i++;
+                if (h) { execLogs.value.push(h); setTimeout(tick, 60); } else { tick(); }
+              } else { gmv.value = r.gmv; business.value = r.business; hasCard.value = r.has_card; if (r.trust) trust.value = r.trust; isExecuting.value = false; }
+            };
+            tick();
+          } catch (e) { execLogs.value = ['❌ ' + e]; isExecuting.value = false; }
+        };
+
+        const openCard = () => window.open('/api/card?sid=' + encodeURIComponent(sid.value), '_blank');
+
+        // ---- 演示验收 ----
+        const runDemo = async (scenario) => {
+          demoLoading.value = true; demoText.value = '';
+          try {
+            const r = await get(`/api/run?scenario=${scenario}&conflict=suggestion`);
+            if (r.ok) { demoText.value = r.text; checklist.value = r.checklist || []; gmv.value = r.gmv || gmv.value; }
+          } catch (e) {}
+          demoLoading.value = false;
+        };
+        const runSelftest = async () => { stLoading.value = true; try { stResult.value = await get('/api/selftest'); } catch (e) {} stLoading.value = false; };
+
+        // ---- 流程控制 ----
+        const goto = (n) => { if (n <= maxReached.value) currentStep.value = n; };
+        const reach = (n) => { maxReached.value = Math.max(maxReached.value, n); goto(n); };
+        const resetFlow = () => { maxReached.value = 0; currentStep.value = 0; planData.value = null; edits.value = []; reviewResult.value = null; execLogs.value = []; business.value = null; hasCard.value = false; gmv.value = 0; sid.value = ''; shareUrl.value = ''; form.value.goal = ''; errorMsg.value = ''; };
+
+        // ---- 展示辅助 ----
+        const getIcon = (type) => ({ choose_activity: '🎨', choose_restaurant: '🍽️', send_gift: '🎁', set_budget: '💰', set_return_time: '🕖', nap_window: '😴', child_safety: '🧒' }[type] || '✨');
+        const countDispo = (d) => planData.value ? planData.value.decisions.filter(x => x.disposition === d && !isResolved(x.status)).length : 0;
+        const countDispoAll = (d) => planData.value ? planData.value.decisions.filter(x => x.disposition === d).length : 0;
+        const isResolved = (status) => ['confirmed', 'done'].includes(status);
+        const getCardStyle = (d) => ({ auto: 'bg-white border border-slate-100 shadow-sm', suggest: 'bg-white border border-amber-200/60 shadow-premium', ask: 'bg-white border-2 border-rose-400 shadow-premium-hover transform -translate-y-1' }[d] || 'bg-white border border-slate-100');
+        const getIconBg = (d, status) => { if (isResolved(status)) return 'bg-slate-100 text-slate-400'; return { auto: 'bg-emerald-50 text-emerald-600', suggest: 'bg-amber-100 text-amber-600', ask: 'bg-rose-500 text-white shadow-md' }[d] || 'bg-slate-100'; };
+        const getMinimalBadge = (dispo, status) => {
+          if (isResolved(status)) return '<span class="text-[11px] font-bold text-emerald-500 uppercase tracking-widest">已拍板</span>';
+          return { auto: '<span class="text-[11px] font-bold text-emerald-500 uppercase tracking-widest">✅ 已直接定</span>', suggest: '<span class="text-[11px] font-bold text-amber-500 uppercase tracking-widest bg-amber-50 px-2 py-1 rounded">💡 待你点头</span>', ask: '<span class="text-[11px] font-bold text-rose-500 uppercase tracking-widest flex items-center gap-1"><span class="w-1.5 h-1.5 rounded-full bg-rose-500 animate-pulse"></span> ❓ 必须你定</span>' }[dispo] || '';
+        };
+        const _esc = (x) => x.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        const prettyExec = (raw) => {
+          // 去掉内部 ID（amap_r_xxx / rest_x / gift_x / act_x），别让技术细节漏给用户
+          let t = (raw || '').replace(/\s*(amap_[a-z]_[A-Za-z0-9]+|rest_[A-Za-z0-9]+|gift_[A-Za-z0-9]+|act_[A-Za-z0-9]+)/g, '');
+          const s = t.trim();
+          if (!s) return '';
+          if (/^[=╔╚║\s].*[=╗╝║\s]$/.test(s) && /[=╔╚║╗╝]/.test(s)) return '';   // 隐藏 ===== / 边框分隔线
+          const step = s.match(/^\[(\d+)\/(\d+)\]\s*(.*)$/);
+          if (step) {
+            const title = _esc(step[3].replace(/⏳.*$/, '').trim());
+            return `<div class="flex items-center gap-3 pt-3 first:pt-0"><span class="w-6 h-6 rounded-lg bg-slate-900 text-white text-[11px] font-black flex items-center justify-center shrink-0">${step[1]}</span><span class="font-bold text-slate-800 text-[15px]">${title}</span></div>`;
+          }
+          if (s.startsWith('💰')) return `<div class="mt-3 inline-flex items-center gap-2 bg-emerald-50 text-emerald-700 font-bold px-4 py-2 rounded-xl text-[14px]">💰 ${_esc(s.replace(/^💰/, '').trim())}</div>`;
+          if (s.startsWith('🎉')) return `<div class="text-slate-700 font-semibold text-[14px] pt-1">${_esc(s)}</div>`;
+          if (/^已落地订单|^本次会话/.test(s)) return `<div class="text-[12px] text-slate-400 pl-9">${_esc(s)}</div>`;
+          let icon = '·', cls = 'text-slate-500', txt = s;
+          if (s.startsWith('✅')) { icon = '✓'; cls = 'text-emerald-600'; txt = s.slice(1).trim(); }
+          else if (s.startsWith('❌')) { icon = '✕'; cls = 'text-rose-500'; txt = s.slice(1).trim(); }
+          else if (s.startsWith('⚠️')) { icon = '!'; cls = 'text-amber-600'; txt = s.replace(/^⚠️/, '').trim(); }
+          else if (s.startsWith('↳')) { icon = '↳'; cls = 'text-slate-400'; txt = s.slice(1).trim(); }
+          return `<div class="flex items-start gap-2.5 pl-9"><span class="shrink-0 font-bold ${cls}">${icon}</span><span class="text-[14px] leading-relaxed ${cls}">${_esc(txt)}</span></div>`;
+        };
+
+        return {
+          activeTab, currentStep, maxReached, steps, gmv, trust, errorMsg, memorySummary,
+          loc, area, locOk, locStatus, addrInput, detectLoc, lockAddr,
+          form, examples, sid, isAnalyzing, planData, answers, suggestions, isSubmittingAnswers,
+          shareUrl, copied, edits, isReviewing, reviewResult, isExecuting, execLogs, business, hasCard, mapUrl,
+          demoLoading, demoText, checklist, stLoading, stResult,
+          startPlan, forgetMe, submitAnswers, copyShare, wifeFar, friendUpscale, allergy, runReview, resolveAndExecute, goExecute, openCard, resetFlow, runDemo, runSelftest,
+          goto, getIcon, countDispo, countDispoAll, isResolved, getCardStyle, getIconBg, getMinimalBadge
+        };
+      }
+    }).mount('#app');
+  </script>
+</body>
+</html>
 """
 
 # ===========================================================================

@@ -49,10 +49,16 @@ def build_first_plan(intent: Intent, tb: ToolBox, party_size: int = 3) -> Plan:
 
     # ---- 1. 孩子安全常识：高置信 + 低代价 -> 直接定（PRD 验收 #1）----
     if has_child:
+        # 置信度 = 命中几条'普遍育儿常识'累加出来的（不是拍 0.92）
+        safe_conf, safe_basis = rules.confidence_from_factors(0.50, [
+            ("普遍育儿常识：避辣", 0.14),
+            ("避酒吧街", 0.14),
+            ("避免太累的项目", 0.14),
+        ])
         decisions.append(_mk(
             "child_safety", "孩子相关常识约束",
             chosen=Option(label="避辣 / 避酒吧街 / 避免太累的项目", kind="value"),
-            confidence=0.92, basis="普遍育儿常识（5 岁孩子）",
+            confidence=safe_conf, basis=safe_basis,
             cost=Cost.LOW, reasoning="这些是公认的安全/舒适底线，错了也容易纠正，无需打扰用户",
         ))
 
@@ -66,6 +72,11 @@ def build_first_plan(intent: Intent, tb: ToolBox, party_size: int = 3) -> Plan:
             options=act_opts, chosen=chosen_act,
             confidence=act_conf, basis=act_basis, cost=Cost.LOW, reasoning=act_reason,
         ))
+        # 动线优化：没点名特定口味时，就在'要去的活动'附近吃，省得唱完 K 还要专程跨城找饭辙。
+        # （只在真实数据下活动带坐标时生效；点名了菜系则保留'专程去吃'的自由。）
+        if chosen_act is not None and chosen_act.get("location") and not c.get("cuisine_pref"):
+            c["near_dining_loc"] = chosen_act.get("location")
+            c["near_dining_label"] = chosen_act.label
 
     # ---- 3. 选餐厅：内部冲突协调（娃 vs 老婆）----
     rests = tb.search_restaurants(child_friendly=c.get("need_child_friendly"),
@@ -75,9 +86,13 @@ def build_first_plan(intent: Intent, tb: ToolBox, party_size: int = 3) -> Plan:
     decisions.append(_build_restaurant_decision(rest_opts, c, has_child))
 
     # ---- 4. 餐厅消费档位：预算未知 + 问错代价高 -> 停下来问（验收 #2）----
+    budget_conf, budget_basis = rules.confidence_from_factors(0.50, [
+        ("预算完全未知", -0.15),
+        ("问错代价高（可能直接超预算、孩子也未必吃得惯）", -0.05),
+    ])
     decisions.append(_mk(
         "set_budget", "餐厅消费档位",
-        confidence=0.30, basis="预算完全未知，且问错代价高",
+        confidence=budget_conf, basis=budget_basis,
         cost=Cost.HIGH,
         reasoning="这家人均不高（~¥85），但若您本想升级到人均 300 的精致餐厅，我不敢替您定——"
                   "请确认：控制在人均 100 左右，还是放开到 300？",
@@ -86,9 +101,13 @@ def build_first_plan(intent: Intent, tb: ToolBox, party_size: int = 3) -> Plan:
     ))
 
     # ---- 5. 几点到家：影响整条时间线，错了全盘崩 -> 停下来问（验收 #2）----
+    ret_conf, ret_basis = rules.confidence_from_factors(0.50, [
+        ("到家时刻完全未知", -0.15),
+        ("它决定整条时间线，错了全盘崩", -0.10),
+    ])
     decisions.append(_mk(
         "set_return_time", "几点必须到家",
-        confidence=0.25, basis="完全未知；它决定整条时间线，错了全盘崩",
+        confidence=ret_conf, basis=ret_basis,
         cost=Cost.HIGH,
         reasoning="请确认今天几点前要到家？（默认按 19:30 排，但不敢替您拍板）",
         counterfactual="如果我按默认 19:30 硬排：万一你其实要早回接老人/孩子要睡，整条行程全得推翻——"
@@ -97,10 +116,14 @@ def build_first_plan(intent: Intent, tb: ToolBox, party_size: int = 3) -> Plan:
 
     # ---- 6. 留不留午睡口子：中置信 + 低代价 -> 给建议（验收 #3，仅亲子出游）----
     if has_child and wants_activity:
+        nap_conf, nap_basis = rules.confidence_from_factors(0.50, [
+            ("留口子代价很低、可随时取消", 0.15),
+            ("今天孩子是否犯困未知", -0.10),
+        ])
         decisions.append(_mk(
             "nap_window", "下午留不留午睡口子",
             chosen=Option(label="14:00 出门前先让孩子睡 40 分钟", kind="value"),
-            confidence=0.55, basis="取决于今天孩子状态（未知），但留口子代价很低",
+            confidence=nap_conf, basis=nap_basis,
             cost=Cost.LOW,
             reasoning="5 岁孩子下午容易犯困，建议留 40 分钟午睡口子再出门；要不要这么排，您定",
         ))
@@ -216,6 +239,9 @@ def _build_restaurant_decision(opts: list[Option], c: dict, has_child: bool) -> 
         desc = f"选餐厅（你想吃{raw}）"
         head = (f"你提到想吃「{raw}」，但我的 Mock 店库里没有对应的这一类——先给最接近约束的 "
                 f"{best.label}，你可以换个说法（如火锅/日料/烧烤/轻食）我再找；") + head
+    if c.get("near_dining_label") and not cui_pref:
+        head = (f"就在你要去的「{c['near_dining_label']}」附近吃，玩完顺路就能解决，不用专程跨城找饭辙；"
+                + head)
     reasoning = head + ("排除：" + "，".join(excluded_bits) if excluded_bits else "")
     # 换店代价低 -> 高置信即可自动定
     return _mk("choose_restaurant", desc,
@@ -335,25 +361,54 @@ def _build_timeline(plan: Plan, c: dict) -> list[Slot]:
         blocks.append({"dur": 30, "title": "礼物惊喜（花+票，待确认）",
                        "note": "情感高光，建议项"})
 
+    FLOOR = 6 * 60   # 没人下午出游早于 06:00：倒排到它之前，说明窗口根本装不下
+    for b in blocks:                 # 记住未加堵车 buffer 的原始时长/备注，便于反复重排
+        b["_base_dur"] = b["dur"]
+        b["_base_note"] = b["note"]
+
     def _layout():
-        cur = end - sum(b["dur"] for b in blocks)
+        total = sum(b["dur"] for b in blocks)
+        cur = end - total
+        if cur < FLOOR:              # 装不下：从清晨正排，老实承认会超时（不再静默堆到 00:00）
+            cur = FLOOR
         for b in blocks:
             b["_s"], b["_e"] = cur, cur + b["dur"]
             cur = b["_e"]
 
-    _layout()
-    # 第二趟：给落在高峰的通勤段加堵车 buffer + 提示（再重排一次）
-    for b in blocks:
-        if b.get("travel"):
+    def _apply_peak_buffers():
+        """按当前布局判高峰、给通勤段加堵车 buffer；返回是否有改动（用于迭代到稳定）。"""
+        changed = False
+        for b in blocks:
+            if not b.get("travel"):
+                continue
+            base = b["_base_dur"]
             pk = _peak_label(b["_s"])
-            if pk:
-                base = b["dur"]
-                b["dur"] = int(round(base * 1.5))
-                b["note"] = f"{pk}路上堵，已多留 {b['dur'] - base} 分钟，建议打车并尽量错峰"
-    _layout()
+            new_dur = int(round(base * 1.5)) if pk else base
+            new_note = (f"{pk}路上堵，已多留 {new_dur - base} 分钟，建议打车并尽量错峰"
+                        if pk else b["_base_note"])
+            if new_dur != b["dur"] or new_note != b["note"]:
+                changed = True
+            b["dur"], b["note"] = new_dur, new_note
+        return changed
 
+    _layout()
+    # 反复'重排→按最终位置复判高峰'，直到稳定：修掉'按旧位置判高峰、提示与时刻对不上'的瑕疵
+    for _ in range(4):
+        changed = _apply_peak_buffers()
+        _layout()                    # 总按最新时长重排，保证位置与时长始终一致
+        if not changed:
+            break
+
+    total = sum(b["dur"] for b in blocks)
+    overflow = bool(blocks) and (end - total) < FLOOR
     slots = [Slot(_hm(b["_s"]), _hm(b["_e"]), b["title"], b["note"]) for b in blocks]
-    if ret:
+    if overflow:
+        actual = blocks[-1]["_e"]
+        slots.append(Slot(_hm(actual), _hm(actual),
+                          f"⚠️ 预计 {_hm(actual)} 才到家（晚于你定的 {ret or '默认 19:30'}）",
+                          f"整条行程约 {total // 60} 小时 {total % 60} 分，从清晨正排都塞不进这个窗口——"
+                          f"建议精简一个环节或放宽到家时间，我没替你硬塞"))
+    elif ret:
         slots.append(Slot(_hm(end), _hm(end), f"到家（按您定的：{ret}）",
                           "set_return_time 已由 A 确认，整条行程已按它倒排"))
     else:

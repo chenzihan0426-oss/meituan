@@ -8,3 +8,5 @@ plan_card*.html
 outbox/
 .amap_cache/
 .prefs.json
+*.bak
+*.zip
