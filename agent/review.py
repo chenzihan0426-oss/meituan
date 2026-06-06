@@ -110,14 +110,15 @@ def _merge_constraint(merged: Plan, constraints: dict, e: Edit, rr: ReviewRound)
         e.merged_note = "已记录该过敏诉求，但当前数据未建模此过敏原，无法自动筛店"
         return
 
-    # 2) 口味 / 辣度
-    if any(k in text for k in ("无辣不欢", "重辣", "爱辣", "要辣", "辣口", "能吃辣", "嗜辣")):
-        constraints["need_spicy"] = True
-        e.merged_note = "已纳入口味偏好：优先有辣口菜的店"
-        return
-    if any(k in text for k in ("怕辣", "清淡", "不吃辣", "少辣", "不辣")):
+    # 2) 口味 / 辣度（先判'避辣'，让'不想吃辣''不吃辣'这类否定不被'辣'误判成要辣）
+    if any(k in text for k in ("怕辣", "清淡", "不想吃辣", "不吃辣", "少辣", "不辣", "微辣")):
         constraints["avoid_spicy"] = True
         e.merged_note = "已纳入口味偏好：偏清淡 / 避免纯辣店"
+        return
+    if any(k in text for k in ("无辣不欢", "重辣", "爱辣", "要辣", "辣口", "能吃辣", "嗜辣",
+                               "想吃辣", "爱吃辣", "多放辣", "重口味")):
+        constraints["need_spicy"] = True
+        e.merged_note = "已纳入口味偏好：优先有辣口菜的店"
         return
 
     # 3) 其它无法建模的约束 -> 诚实记录

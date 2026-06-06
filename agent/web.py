@@ -338,10 +338,24 @@ def api_review(body: dict) -> dict:
         return {"ok": False, "error": "会话已过期"}
     plan, constraints, party = s["plan"], s["constraints"], s["party"]
     raw_edits = body.get("edits") or []
+    # 先把'改活动/菜系/距离/预算'这类要求拎出来，直接用高德重搜重排——评审合并通道做不了这些，
+    # 以前会当'无法筛店'丢掉（比如'带小孩去游乐园'就没规划进去）。
+    replan_merged = []
+    rest_edits = []
+    for e in raw_edits:
+        txt = (e.get("constraint") or "").strip()
+        if e.get("type") == "constraint" and _text_has_replan_pref(txt):
+            for a in _replan_with_text(s, txt):
+                replan_merged.append({"author": (e.get("author") or "我"), "constraint": a,
+                                      "label": None, "merged_note": "已据此用高德重搜重排", "actionable": True})
+        else:
+            rest_edits.append(e)
+
+    plan = s["plan"]                       # 重排可能换了餐厅候选，重新取
     rest = plan.find_by_type("choose_restaurant")
     cur = rest.chosen if rest else None
     edits, participants, seen = [], [], {}
-    for e in raw_edits:
+    for e in rest_edits:
         name = (e.get("author") or "某人").strip() or "某人"
         weight = max(0.0, min(1.0, float(e.get("weight", 0.6))))
         if name not in seen:
@@ -359,12 +373,16 @@ def api_review(body: dict) -> dict:
                 edits.append(Edit(author=author, target_decision="choose_restaurant",
                                   type=EditType.REPLACE, before=cur, after=opt,
                                   note=(e.get("note") or "").strip()))
-    if not edits:
+    if not edits and not replan_merged:
         return {"ok": False, "error": "没有有效改动；可直接执行，或添加至少一条改动"}
+    if not edits:
+        # 只有'重搜类'要求：无需评审回合，s["plan"] 已重排好，直接出新方案
+        return {"ok": True, "auto_merged": replan_merged, "conflicts": [],
+                "merged_plan": _ser_plan(plan)}
     rr = run_review_round(plan, participants, edits, constraints, party_size=party)
     s["rr"] = rr
     return {"ok": True,
-            "auto_merged": [{"author": e.author.id, "constraint": e.constraint,
+            "auto_merged": replan_merged + [{"author": e.author.id, "constraint": e.constraint,
                              "label": (e.after.label if e.after else None),
                              "merged_note": e.merged_note, "actionable": e.actionable}
                             for e in rr.auto_merged],
@@ -436,9 +454,9 @@ def _map_spots(s: dict) -> list:
     cons = s.get("constraints", {})
     ordered = [amap.search_center(cons)]
     plan = s["plan"]
-    act = plan.find_by_type("choose_activity")
-    if act and act.chosen and act.chosen.get("location"):
-        ordered.append(act.chosen.get("location"))
+    for act in [d for d in plan.decisions if d.type.startswith("choose_activity") and d.chosen]:
+        if act.chosen.get("location"):
+            ordered.append(act.chosen.get("location"))
     rest = plan.find_by_type("choose_restaurant")
     if rest and rest.chosen and rest.chosen.get("location"):
         ordered.append(rest.chosen.get("location"))
@@ -502,6 +520,152 @@ def api_resolve(body: dict) -> dict:
     return {"ok": True, "plan": _ser_plan(final)}
 
 
+def _text_has_replan_pref(text: str) -> bool:
+    """这句要求是否包含'需要重搜重排'的偏好（改活动/菜系/距离/预算）——
+    用于让协同评审通道也把这类要求交给 _replan_with_text，而不是当'无法筛店'丢掉。
+    注意：过敏/辣度不算（仍交给评审回合处理，保住'守过敏/带权重撞车'那套）。"""
+    from .intent import _scan_activity, CUISINE_PREF
+    if not text:
+        return False
+    cat, raw = _scan_activity(text)
+    if cat or raw:
+        return True
+    if any(k in text for kws in CUISINE_PREF.values() for k in kws):
+        return True
+    if any(k in text for k in ("近一点", "别太远", "近点", "离家近", "远点也行", "可以远", "远一些")):
+        return True
+    if re.search(r"人均\s*\d+", text) or any(k in text for k in ("便宜", "实惠", "省点", "高档", "上档次", "精致", "好一点")):
+        return True
+    return False
+
+
+def _replan_with_text(s: dict, text: str) -> list:
+    """把一句自由要求识别成改活动/菜系/距离/预算/过敏/辣度，用会话的高德 ToolBox
+    真正重搜重排。返回已执行的人话清单（空 = 没听出可执行偏好）。被 refine 与评审通道共用。"""
+    from . import rules
+    from .intent import _scan_activity, all_activity_cats, ACTIVITY_PREF_LABEL, positive_cuisine
+    from .planner import _pick_activity, _opt_from_activity, _mk
+    from .review import KNOWN_ALLERGENS
+
+    plan, tb, c, party = s["plan"], s["tb"], s["constraints"], s["party"]
+    applied, re_activity, re_restaurant = [], False, False
+
+    new_acts = all_activity_cats(text)                   # 1) 改活动（可一次多个；累加不覆盖）
+    if not new_acts:
+        _, raw = _scan_activity(text)
+        if raw:
+            new_acts = ["raw:" + raw]
+    if new_acts:
+        lst = c.get("activity_cats")
+        if lst is None:                                  # 首次：以原有活动为底，再往上加
+            lst = []
+            if c.get("activity_pref"):
+                lst.append(c["activity_pref"])
+            elif c.get("activity_raw"):
+                lst.append("raw:" + c["activity_raw"])
+        added = []
+        for a in new_acts:
+            if a not in lst:
+                lst.append(a)
+                added.append(a[4:] if a.startswith("raw:") else ACTIVITY_PREF_LABEL.get(a, a))
+        c["activity_cats"] = lst
+        if added:
+            applied.append("活动加上：" + "、".join(added))
+        re_activity = True
+    cui = positive_cuisine(text)                          # 2) 改菜系（否定语境如'不吃海鲜'不算）
+    if cui:
+        c["cuisine_pref"] = cui; c.pop("near_dining_loc", None); c.pop("near_dining_label", None)
+        applied.append(f"口味改为「{cui}」（点名了菜系，可专程去吃）"); re_restaurant = True
+    if any(k in text for k in ("近一点", "别太远", "近点", "离家近")):   # 3) 改距离
+        c["max_distance_km"] = min(c.get("max_distance_km") or 10, 5.0); applied.append("更就近找"); re_restaurant = True
+    elif any(k in text for k in ("远点也行", "可以远", "远一些")):
+        c["max_distance_km"] = max(c.get("max_distance_km") or 10, 20.0); applied.append("放宽距离"); re_restaurant = True
+    m = re.search(r"人均\s*(\d+)", text)                   # 4) 改预算
+    if m:
+        c["budget_per_capita"] = int(m.group(1)); applied.append(f"预算调到人均 {m.group(1)}"); re_restaurant = True
+    elif any(k in text for k in ("便宜", "实惠", "省点")):
+        c["budget_per_capita"] = min(c.get("budget_per_capita") or 100, 80); applied.append("往便宜里挑"); re_restaurant = True
+    elif any(k in text for k in ("高档", "上档次", "精致", "好一点")):
+        c["budget_per_capita"] = max(c.get("budget_per_capita") or 100, 250); applied.append("往高档里挑"); re_restaurant = True
+    al = next((a for a in KNOWN_ALLERGENS if a in text), None)   # 5) 过敏（要有'过敏/忌/不吃'语境，'想吃海鲜'不算）
+    if al and any(w in text for w in ("过敏", "忌口", "忌", "不吃", "不能吃", "避开")):
+        c.setdefault("allergens", [])
+        if al not in c["allergens"]:
+            c["allergens"].append(al)
+        applied.append(f"避开{al}"); re_restaurant = True
+    if any(k in text for k in ("怕辣", "清淡", "不想吃辣", "不吃辣", "少辣", "不辣")):   # 6) 辣度
+        c["avoid_spicy"] = True; c.pop("need_spicy", None); applied.append("偏清淡"); re_restaurant = True
+    elif any(k in text for k in ("想吃辣", "爱吃辣", "重辣", "无辣不欢", "重口味")):
+        c["need_spicy"] = True; c.pop("avoid_spicy", None); applied.append("要够辣"); re_restaurant = True
+
+    if not applied:
+        return []
+
+    tb.context = {"goal": s["intent"].raw, "constraints": c}   # 让搜索用最新约束
+    has_child = bool(c.get("need_child_friendly"))
+
+    if re_activity:                                       # 按 activity_cats 重建全部活动决定（多活动并存）
+        plan.decisions = [d for d in plan.decisions if not d.type.startswith("choose_activity")]
+        insert_idx = next((i for i, d in enumerate(plan.decisions) if d.type == "choose_restaurant"), len(plan.decisions))
+        last_loc = last_label = None
+        for n, item in enumerate(c.get("activity_cats", [])):
+            if item.startswith("raw:"):
+                c.pop("activity_pref", None); c["activity_raw"] = item[4:]
+            else:
+                c["activity_pref"] = item; c.pop("activity_raw", None)
+            try:
+                opts = [_opt_from_activity(a) for a in tb.search_activities()]
+                chosen_act, conf, basis, reason = _pick_activity(opts, c, has_child)
+            except Exception:
+                continue
+            typ = "choose_activity" if n == 0 else f"choose_activity_{n + 1}"
+            desc = "选活动" if n == 0 else f"选活动 #{n + 1}"
+            plan.decisions.insert(insert_idx, _mk(typ, desc, options=opts, chosen=chosen_act,
+                                                  confidence=conf, basis=basis, cost=Cost.LOW, reasoning=reason))
+            insert_idx += 1
+            if chosen_act is not None and chosen_act.get("location"):
+                last_loc, last_label = chosen_act.get("location"), chosen_act.label
+        c.pop("activity_pref", None); c.pop("activity_raw", None)   # 临时键清掉，以 activity_cats 为准
+        if last_loc and not c.get("cuisine_pref"):       # 吃饭锚到最后一个活动
+            c["near_dining_loc"], c["near_dining_label"] = last_loc, last_label
+        re_restaurant = True
+
+    if re_restaurant:                                     # 重搜餐厅（高德）
+        try:
+            rests = tb.search_restaurants(child_friendly=c.get("need_child_friendly"),
+                                          low_cal=c.get("need_low_cal"),
+                                          exclude_allergens=c.get("allergens"))
+            fresh = _build_restaurant_decision([_opt_from_restaurant(r) for r in rests], c, has_child)
+            dec = plan.find_by_type("choose_restaurant")
+            if dec is not None:
+                dec.options, dec.chosen = fresh.options, fresh.chosen
+                dec.confidence, dec.confidence_basis = fresh.confidence, fresh.confidence_basis
+                dec.reasoning, dec.description, dec.disposition = fresh.reasoning, fresh.description, fresh.disposition
+        except Exception:
+            pass
+
+    plan.version += 1
+    plan.recompute_open_questions()
+    plan.timeline = _build_timeline(plan, c)
+    plan.tips = build_tips(plan, c)
+    plan.gmv_estimate = estimate_gmv(plan, party)
+    return applied
+
+
+def api_refine(body: dict) -> dict:
+    """'我来加个要求'：识别成改活动/菜系/距离/预算/过敏/辣度，用高德重搜重排。"""
+    s = SESSIONS.get(body.get("sid"))
+    if not s:
+        return {"ok": False, "error": "会话已过期"}
+    text = (body.get("text") or "").strip()
+    if not text:
+        return {"ok": False, "error": "先写一句你的新要求"}
+    applied = _replan_with_text(s, text)
+    if not applied:
+        return {"ok": False, "error": "没听出可执行的偏好——试试'想去唱K / 想吃火锅 / 便宜点 / 我对花生过敏'"}
+    return {"ok": True, "applied": applied, "plan": _ser_plan(s["plan"]), "source": s["tb"].last_source}
+
+
 def api_execute(body: dict) -> dict:
     s = SESSIONS.get(body.get("sid"))
     if not s:
@@ -536,9 +700,8 @@ def _business_summary(plan, tb, party: int) -> dict:
     用的是**美团天天在测、可优化**的标准指标(连带率/客单价/留存)，不是拍脑袋的假数。
     """
     items = []
-    act = plan.find_by_type("choose_activity")
-    if act and act.chosen:
-        items.append({"label": "活动/门票", "amt": round((act.chosen.price or 0) * party)})
+    for act in [d for d in plan.decisions if d.type.startswith("choose_activity") and d.chosen]:
+        items.append({"label": f"活动/门票（{act.chosen.label}）", "amt": round((act.chosen.price or 0) * party)})
     rest = plan.find_by_type("choose_restaurant")
     if rest and rest.chosen:
         items.append({"label": "餐厅", "amt": round((rest.chosen.price or 0) * party)})
@@ -692,9 +855,9 @@ class Handler(BaseHTTPRequestHandler):
         u = urlparse(self.path)
         handlers = {"/api/start": api_start, "/api/answer": api_answer,
                     "/api/review": api_review, "/api/resolve": api_resolve,
-                    "/api/execute": api_execute, "/api/geo": api_geo,
-                    "/api/submit_edit": api_submit_edit, "/api/autonomy": api_autonomy,
-                    "/api/forget": api_forget}
+                    "/api/refine": api_refine, "/api/execute": api_execute,
+                    "/api/geo": api_geo, "/api/submit_edit": api_submit_edit,
+                    "/api/autonomy": api_autonomy, "/api/forget": api_forget}
         fn = handlers.get(u.path)
         if not fn:
             self._send(404, b"not found", "text/plain; charset=utf-8")
@@ -921,9 +1084,21 @@ PAGE = r"""<!doctype html>
                     </div>
 
                     <div v-if="!isResolved(dec.status)" class="pl-14 mt-6">
-                      <div v-if="dec.disposition === 'ask'" class="relative animate-float">
-                        <div class="absolute inset-y-0 left-4 flex items-center pointer-events-none"><span class="text-rose-500 text-lg">✦</span></div>
-                        <input v-model="answers[dec.id]" @keyup.enter="submitAnswers" class="w-full bg-white/80 backdrop-blur border-2 border-rose-200 focus:border-rose-500 focus:ring-4 focus:ring-rose-500/10 rounded-2xl pl-12 pr-6 py-4 text-[15px] font-medium text-slate-900 outline-none transition-all shadow-sm placeholder-rose-300/80" placeholder="请告诉我具体预期（例如：人均150内 / 7点前到家）">
+                      <div v-if="dec.disposition === 'ask'" class="space-y-3">
+                        <div class="flex flex-wrap gap-2">
+                          <button v-for="opt in askOptions(dec.type)" :key="opt" @click="pickAsk(dec.id, opt)"
+                                  :class="['px-4 py-2.5 rounded-xl text-[14px] font-semibold border transition active:scale-95', answers[dec.id] === opt ? 'bg-rose-500 text-white border-rose-500 shadow-sm' : 'bg-white text-slate-600 border-slate-200 hover:border-rose-300']">
+                            {{ opt }}
+                          </button>
+                          <button v-if="askOptions(dec.type).length" @click="pickCustom(dec)"
+                                  :class="['px-4 py-2.5 rounded-xl text-[14px] font-semibold border transition active:scale-95', customAsk[dec.id] ? 'bg-slate-900 text-white border-slate-900' : 'bg-white text-slate-500 border-slate-200 hover:border-slate-300']">
+                            ✏️ 自己填
+                          </button>
+                        </div>
+                        <div v-if="customAsk[dec.id] || !askOptions(dec.type).length" class="relative animate-float">
+                          <div class="absolute inset-y-0 left-4 flex items-center pointer-events-none"><span class="text-rose-500 text-lg">✦</span></div>
+                          <input v-model="answers[dec.id]" @keyup.enter="submitAnswers" class="w-full bg-white/80 backdrop-blur border-2 border-rose-200 focus:border-rose-500 focus:ring-4 focus:ring-rose-500/10 rounded-2xl pl-12 pr-6 py-3.5 text-[15px] font-medium text-slate-900 outline-none transition-all shadow-sm placeholder-rose-300/80" placeholder="自己写：如 人均150内 / 18:00前到家">
+                        </div>
                       </div>
                       <label v-if="dec.disposition === 'suggest'" class="group flex items-center gap-4 cursor-pointer">
                         <div class="relative flex items-center justify-center w-6 h-6">
@@ -979,20 +1154,20 @@ PAGE = r"""<!doctype html>
 
               <div class="fixed bottom-8 left-1/2 -translate-x-1/2 w-[calc(100%-3rem)] max-w-3xl z-40 bg-slate-900/90 backdrop-blur-2xl rounded-3xl p-3 shadow-2xl border border-white/10 flex items-center justify-between">
                 <div class="text-white text-sm font-medium px-4 flex items-center gap-3">
-                  <div v-if="countDispo('ask') > 0" class="relative flex h-3 w-3"><span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-rose-400 opacity-75"></span><span class="relative inline-flex rounded-full h-3 w-3 bg-rose-500"></span></div>
+                  <div v-if="unansweredAsks() > 0" class="relative flex h-3 w-3"><span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-rose-400 opacity-75"></span><span class="relative inline-flex rounded-full h-3 w-3 bg-rose-500"></span></div>
                   <div v-else class="w-2 h-2 rounded-full bg-emerald-500"></div>
-                  {{ countDispo('ask') > 0 ? `还有 ${countDispo('ask')} 件需要你回答` : '都齐了，可以往下走。' }}
+                  {{ unansweredAsks() > 0 ? `还有 ${unansweredAsks()} 件待你选` : '都齐了，可以往下走。' }}
                 </div>
                 <button @click="submitAnswers" :disabled="isSubmittingAnswers" class="bg-white text-slate-900 font-extrabold py-3 px-8 rounded-2xl hover:scale-[0.98] transition-transform active:scale-95 disabled:opacity-50 disabled:hover:scale-100">{{ isSubmittingAnswers ? '重新规划中...' : '确认方案 →' }}</button>
               </div>
             </div>
 
-            <!-- 步骤 3: 协同评审 -->
+            <!-- 步骤 3: 协同反馈（收集，不直接执行）-->
             <div v-else-if="currentStep === 2" class="absolute w-full top-0 left-0 pb-20">
               <div class="mb-10 text-center">
                 <div class="w-16 h-16 rounded-3xl bg-indigo-100 text-indigo-500 mx-auto flex items-center justify-center text-3xl mb-6 shadow-sm">👥</div>
-                <h2 class="text-3xl font-extrabold tracking-tight text-slate-900 mb-3">众口难调？拉朋友一起改</h2>
-                <p class="text-slate-500 text-[15px] max-w-lg mx-auto">把链接发给同行的人，各自上去改。AI 自动合并无争议的，撞车处按「内容契合 × 谁说的(权重)」给带理由的建议，拍板权留给你。</p>
+                <h2 class="text-3xl font-extrabold tracking-tight text-slate-900 mb-3">还想调整？提点要求再生成</h2>
+                <p class="text-slate-500 text-[15px] max-w-lg mx-auto">把链接发给同行的人各自改，或自己加要求。AI 合并后会先把<b class="text-slate-700">新方案给你过目</b>，满意了你再决定执行。</p>
               </div>
 
               <div v-if="shareUrl" class="bg-white rounded-2xl shadow-sm border border-slate-100 p-5 mb-6 flex items-center gap-3">
@@ -1002,15 +1177,19 @@ PAGE = r"""<!doctype html>
               </div>
 
               <div class="bg-white rounded-[2rem] shadow-premium border border-slate-100 p-8 mb-8">
-                <div class="text-[11px] font-bold text-slate-400 uppercase tracking-widest mb-5">模拟好友反馈注入（也可让朋友扫上面链接真改）</div>
+                <div class="text-[11px] font-bold text-slate-400 uppercase tracking-widest mb-5">加要求 / 模拟好友反馈</div>
+                <div class="flex gap-2 mb-5">
+                  <input v-model="newConstraint" @keyup.enter="refine" placeholder="直接打字加要求，如：换便宜点的 / 我对花生过敏 / 想吃清淡点" class="flex-1 bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-[14px] outline-none focus:border-rose-300">
+                  <button @click="refine" class="bg-slate-900 text-white font-bold px-5 rounded-xl hover:bg-rose-500 transition active:scale-95 text-[14px]">加上</button>
+                </div>
                 <div class="flex flex-wrap gap-3 mb-6">
-                  <button @click="wifeFar" class="bg-slate-50 hover:bg-indigo-50 hover:text-indigo-600 border border-slate-200 text-slate-600 font-semibold rounded-xl px-5 py-2.5 transition-all active:scale-95 text-[14px]">👩 妻子嫌远，要换最近的</button>
+                  <button @click="wifeFar" class="bg-slate-50 hover:bg-indigo-50 hover:text-indigo-600 border border-slate-200 text-slate-600 font-semibold rounded-xl px-5 py-2.5 transition-all active:scale-95 text-[14px]">👩 妻子嫌远，换最近的</button>
                   <button @click="friendUpscale" class="bg-slate-50 hover:bg-indigo-50 hover:text-indigo-600 border border-slate-200 text-slate-600 font-semibold rounded-xl px-5 py-2.5 transition-all active:scale-95 text-[14px]">🧑 朋友想换一家</button>
                   <button @click="allergy" class="bg-slate-50 hover:bg-rose-50 hover:text-rose-600 border border-slate-200 text-slate-600 font-semibold rounded-xl px-5 py-2.5 transition-all active:scale-95 text-[14px]">⚠️ 有人海鲜过敏</button>
                 </div>
 
                 <div v-if="edits.length > 0" class="space-y-3 p-4 bg-slate-50/50 rounded-2xl border border-slate-100">
-                  <div class="text-xs font-bold text-slate-400 mb-2">待处理队列：</div>
+                  <div class="text-xs font-bold text-slate-400 mb-2">待合并队列：</div>
                   <transition-group name="list">
                     <div v-for="(edit, idx) in edits" :key="idx" class="flex items-center justify-between bg-white px-4 py-3 rounded-xl shadow-sm border border-slate-100">
                       <div class="flex items-center gap-3">
@@ -1023,30 +1202,96 @@ PAGE = r"""<!doctype html>
                 </div>
               </div>
 
-              <!-- 评审结果（真实引擎输出） -->
-              <div v-if="reviewResult" class="bg-white rounded-[2rem] shadow-premium border border-slate-100 p-8 mb-8 animate-fade-in-up">
-                <div v-if="reviewResult.auto_merged.length" class="mb-6">
-                  <div class="text-[11px] font-bold text-emerald-500 uppercase tracking-widest mb-3">✅ 自动合并（无争议）</div>
-                  <div v-for="(m, i) in reviewResult.auto_merged" :key="i" class="text-[13px] text-slate-600 mb-1">· {{ m.author }}：{{ m.constraint || m.label }} <span class="text-slate-400">— {{ m.merged_note }}</span></div>
+              <div v-if="errorMsg" class="mb-4 text-sm text-rose-500 font-semibold pl-2">{{ errorMsg }}</div>
+              <div class="flex gap-4">
+                <button @click="goExecute" class="flex-1 bg-white border border-slate-200 text-slate-600 hover:text-slate-900 font-bold py-4 rounded-2xl hover:border-slate-300 transition-all active:scale-95 shadow-sm">无需调整，直接执行</button>
+                <button @click="regenerate" :disabled="edits.length === 0 || isReviewing" class="flex-1 bg-slate-900 text-white font-extrabold py-4 rounded-2xl shadow-xl hover:shadow-2xl hover:-translate-y-0.5 transition-all disabled:opacity-50 disabled:hover:transform-none active:scale-95">{{ isReviewing ? '生成中...' : '让 AI 合并，生成新方案 →' }}</button>
+              </div>
+            </div>
+
+            <!-- 步骤 4: 定稿确认（看新方案 + 出行提醒 → 继续加要求 或 确认执行）-->
+            <div v-else-if="currentStep === 3 && planData" class="absolute w-full top-0 left-0 pb-32">
+              <div class="mb-8">
+                <h2 class="text-3xl font-extrabold tracking-tight text-slate-900 mb-2">融合反馈后的新方案 <span class="text-slate-400 text-2xl">v{{ planData.version }}</span></h2>
+                <p class="text-slate-500 text-[15px]">你过目一下。还有不满意的，下面接着加要求再生成；满意了再执行——<b class="text-slate-700">在你点头前，我不会下单。</b></p>
+              </div>
+
+              <!-- AI 如何处理了反馈 -->
+              <div v-if="reviewResult && (reviewResult.auto_merged.length || reviewResult.conflicts.length)" class="bg-white rounded-3xl shadow-sm border border-slate-100 p-6 mb-6">
+                <div class="text-[11px] font-bold text-slate-400 uppercase tracking-widest mb-3">🤖 我这样处理了大家的反馈</div>
+                <div v-for="(m, i) in reviewResult.auto_merged" :key="'m'+i" class="text-[13px] text-slate-600 mb-1"><span class="text-emerald-500 font-bold">✓ 已合并</span> {{ m.author }}：{{ m.constraint || m.label }} <span class="text-slate-400">— {{ m.merged_note }}</span></div>
+                <div v-for="(c, i) in reviewResult.conflicts" :key="'c'+i" class="text-[13px] text-slate-600 mt-2"><span class="text-amber-500 font-bold">⚖ 撞车</span> 采纳「{{ c.suggestion ? c.suggestion.label : '—' }}」（{{ c.suggestion_owner }}）<div class="text-[12px] text-slate-400 whitespace-pre-line pl-5">{{ c.reason }}</div></div>
+              </div>
+
+              <!-- 新方案决定（只读） -->
+              <div class="space-y-3 mb-6">
+                <div v-for="dec in planData.decisions" :key="dec.id" class="bg-white rounded-2xl border border-slate-100 shadow-sm p-5 flex items-start gap-4">
+                  <div class="w-9 h-9 rounded-xl bg-slate-50 flex items-center justify-center text-lg shrink-0">{{ getIcon(dec.type) }}</div>
+                  <div class="flex-1 min-w-0">
+                    <div class="text-[14px] font-bold text-slate-800">{{ dec.description }}</div>
+                    <div v-if="dec.chosen" class="text-[13px] text-slate-500 mt-0.5">→ {{ dec.chosen.label }}</div>
+                  </div>
+                  <div class="shrink-0 self-center" v-html="getMinimalBadge(dec.disposition, dec.status)"></div>
                 </div>
-                <div v-if="reviewResult.conflicts.length">
-                  <div class="text-[11px] font-bold text-rose-500 uppercase tracking-widest mb-3">⚖️ 撞车待裁决（带理由的建议）</div>
-                  <div v-for="(c, i) in reviewResult.conflicts" :key="i" class="bg-rose-50/50 border border-rose-100 rounded-xl p-4 mb-3">
-                    <div class="text-[13px] font-bold text-slate-700 mb-1">🤖 建议采纳：{{ c.suggestion ? c.suggestion.label : '—' }}（{{ c.suggestion_owner }}）</div>
-                    <div class="text-[12px] text-slate-500 whitespace-pre-line leading-relaxed">{{ c.reason }}</div>
+              </div>
+
+              <!-- 时间线 -->
+              <div v-if="planData.timeline && planData.timeline.length" class="bg-white rounded-3xl shadow-sm border border-slate-100 p-6 md:p-8 mb-6">
+                <div class="text-[11px] font-bold text-slate-400 uppercase tracking-widest mb-5">⏱️ 行程时间线</div>
+                <div class="space-y-3">
+                  <div v-for="(s, i) in planData.timeline" :key="i" class="flex gap-4 items-start">
+                    <div class="text-[13px] font-mono font-bold text-slate-400 w-24 shrink-0 pt-0.5">{{ s.start }}<span v-if="s.end !== s.start">–{{ s.end }}</span></div>
+                    <div class="flex-1 border-l-2 border-slate-100 pl-4 pb-2">
+                      <div :class="['text-[14px] font-bold', s.title.includes('⚠️') ? 'text-rose-500' : 'text-slate-800']">{{ s.title }}</div>
+                      <div class="text-[12px] text-slate-400 mt-0.5">{{ s.reason }}</div>
+                    </div>
                   </div>
                 </div>
               </div>
 
-              <div class="flex gap-4">
-                <button @click="goExecute" class="flex-1 bg-white border border-slate-200 text-slate-600 hover:text-slate-900 font-bold py-4 rounded-2xl hover:border-slate-300 transition-all active:scale-95 shadow-sm">跳过评审，直接执行</button>
-                <button v-if="!reviewResult" @click="runReview" :disabled="edits.length === 0 || isReviewing" class="flex-1 bg-slate-900 text-white font-extrabold py-4 rounded-2xl shadow-xl hover:shadow-2xl hover:-translate-y-0.5 transition-all disabled:opacity-50 disabled:hover:transform-none active:scale-95">{{ isReviewing ? '合并中...' : '让 AI 合并并解决冲突 →' }}</button>
-                <button v-else @click="resolveAndExecute" :disabled="isReviewing" class="flex-1 bg-slate-900 text-white font-extrabold py-4 rounded-2xl shadow-xl hover:-translate-y-0.5 transition-all active:scale-95 disabled:opacity-50">按 AI 建议裁决并执行 →</button>
+              <!-- 出行提醒 -->
+              <div v-if="planData.tips && planData.tips.length" class="bg-gradient-to-br from-rose-50/70 to-orange-50/70 rounded-3xl border border-rose-100/60 p-6 md:p-8 mb-6">
+                <div class="text-[11px] font-bold text-rose-400 uppercase tracking-widest mb-4">🤝 出发前，几句出行提醒</div>
+                <div class="space-y-2.5">
+                  <div v-for="(t, i) in planData.tips" :key="i" class="text-[14px] text-slate-600 leading-relaxed">{{ t }}</div>
+                </div>
+              </div>
+
+              <!-- 真实路线地图 -->
+              <div v-if="mapUrl" class="bg-white rounded-3xl shadow-sm border border-slate-100 p-4 mb-8">
+                <div class="text-[11px] font-bold text-slate-400 uppercase tracking-widest mb-3 px-2">🗺️ 真实路线（高德实景，可当场搜证）</div>
+                <img :src="mapUrl" @error="mapUrl = ''" class="w-full rounded-2xl" alt="高德真实路线图">
+              </div>
+
+              <!-- 继续加要求（循环再生成）-->
+              <div class="bg-white rounded-[2rem] shadow-premium border border-slate-100 p-6 mb-6">
+                <div class="text-[11px] font-bold text-slate-400 uppercase tracking-widest mb-4">还不满意？接着加要求，再生成一版</div>
+                <div class="flex gap-2 mb-3">
+                  <input v-model="newConstraint" @keyup.enter="refine" placeholder="如：换便宜点的 / 离地铁近一点 / 想吃辣的" class="flex-1 bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-[14px] outline-none focus:border-rose-300">
+                  <button @click="refine" class="bg-slate-100 text-slate-700 font-bold px-5 rounded-xl hover:bg-slate-200 transition active:scale-95 text-[14px]">加上</button>
+                </div>
+                <div class="flex flex-wrap gap-2 mb-3">
+                  <button @click="wifeFar" class="bg-slate-50 hover:bg-indigo-50 border border-slate-200 text-slate-600 font-semibold rounded-lg px-4 py-2 transition active:scale-95 text-[13px]">👩 换最近的</button>
+                  <button @click="friendUpscale" class="bg-slate-50 hover:bg-indigo-50 border border-slate-200 text-slate-600 font-semibold rounded-lg px-4 py-2 transition active:scale-95 text-[13px]">🧑 换一家</button>
+                  <button @click="allergy" class="bg-slate-50 hover:bg-rose-50 border border-slate-200 text-slate-600 font-semibold rounded-lg px-4 py-2 transition active:scale-95 text-[13px]">⚠️ 海鲜过敏</button>
+                </div>
+                <div v-if="edits.length > 0" class="space-y-2">
+                  <div v-for="(edit, idx) in edits" :key="idx" class="flex items-center justify-between bg-slate-50/70 px-4 py-2 rounded-xl text-[13px]">
+                    <span class="text-slate-600"><b class="text-slate-700">{{ edit.author }}</b>：{{ edit.type === 'constraint' ? edit.constraint : '换店 → ' + edit._label }}</span>
+                    <button @click="edits.splice(idx, 1)" class="text-slate-300 hover:text-rose-500 p-1">✕</button>
+                  </div>
+                  <button @click="regenerate" :disabled="isReviewing" class="w-full mt-2 bg-slate-900 text-white font-bold py-3 rounded-xl hover:bg-rose-500 transition active:scale-95 disabled:opacity-50">{{ isReviewing ? '再生成中...' : '🔄 按新要求再生成一版' }}</button>
+                </div>
+              </div>
+
+              <div class="fixed bottom-8 left-1/2 -translate-x-1/2 w-[calc(100%-3rem)] max-w-3xl z-40 bg-slate-900/90 backdrop-blur-2xl rounded-3xl p-3 shadow-2xl border border-white/10 flex items-center justify-between">
+                <div class="text-white text-sm font-medium px-4">方案 v{{ planData.version }} · 满意就执行，否则上面接着改</div>
+                <button @click="goExecute" class="bg-white text-slate-900 font-extrabold py-3 px-8 rounded-2xl hover:scale-[0.98] transition-transform active:scale-95">✅ 方案可行，开始执行 →</button>
               </div>
             </div>
 
-            <!-- 步骤 4: 执行 -->
-            <div v-else-if="currentStep === 3" class="absolute w-full top-0 left-0">
+            <!-- 步骤 5: 执行 -->
+            <div v-else-if="currentStep === 4" class="absolute w-full top-0 left-0">
               <div class="mb-8">
                 <h2 class="text-3xl font-extrabold tracking-tight text-slate-900 mb-2">正在为你调度执行。</h2>
                 <p class="text-slate-500 text-[15px]">真实跑「查→订→买→送→发」闭环，含满座/超时重试/配送失败回滚补偿。</p>
@@ -1124,7 +1369,7 @@ PAGE = r"""<!doctype html>
         const activeTab = ref('I');
         const currentStep = ref(0);
         const maxReached = ref(0);
-        const steps = ['输入意图', '方案确认', '协同反馈', '执行完毕'];
+        const steps = ['输入意图', '方案确认', '协同反馈', '定稿确认', '执行完毕'];
         const gmv = ref(0);
         const trust = ref(null);
         const errorMsg = ref('');
@@ -1179,6 +1424,7 @@ PAGE = r"""<!doctype html>
         const shareUrl = ref('');
         const copied = ref(false);
         const edits = ref([]);
+        const newConstraint = ref('');
         const isReviewing = ref(false);
         const reviewResult = ref(null);
 
@@ -1249,36 +1495,51 @@ PAGE = r"""<!doctype html>
         const wifeFar = () => { const c = candidates().slice().sort((a, b) => (a.distance_km || 99) - (b.distance_km || 99))[0]; if (c) pushEdit({ author: '妻子', weight: 0.9, type: 'restaurant', after_id: c.id, _label: c.label }); };
         const friendUpscale = () => { const c = candidates().slice().sort((a, b) => (b.per_capita || 0) - (a.per_capita || 0))[0]; if (c) pushEdit({ author: '朋友', weight: 0.5, type: 'restaurant', after_id: c.id, _label: c.label }); };
         const allergy = () => pushEdit({ author: '好友A', weight: 0.6, type: 'constraint', constraint: '我对海鲜过敏', _label: '海鲜过敏' });
+        // 我自己加要求 → 调 /api/refine 立即用高德重搜重排（识别改活动/菜系/距离/预算/过敏/辣度）
+        const refine = async () => {
+          const t = newConstraint.value.trim(); if (!t || isReviewing.value) return;
+          isReviewing.value = true; errorMsg.value = '';
+          try {
+            const r = await post('/api/refine', { sid: sid.value, text: t });
+            if (r.ok) {
+              planData.value = r.plan; gmv.value = r.plan.gmv_estimate || gmv.value;
+              reviewResult.value = { auto_merged: (r.applied || []).map(a => ({ author: '我', constraint: a, merged_note: '已据此用高德重搜重排' })), conflicts: [] };
+              newConstraint.value = ''; refreshMap(); reach(3);
+              window.scrollTo({ top: 0, behavior: 'smooth' });
+            } else { errorMsg.value = r.error; }
+          } catch (e) { errorMsg.value = '' + e; }
+          isReviewing.value = false;
+        };
 
-        const runReview = async () => {
+        // 合并反馈 → 生成新方案 → 进"定稿确认"（不直接执行；用户看过、可继续加要求，满意了才执行）
+        const regenerate = async () => {
           if (!edits.value.length) return;
+          errorMsg.value = '';
           isReviewing.value = true;
           try {
             const payload = edits.value.map(e => e.type === 'constraint'
               ? { author: e.author, weight: e.weight, type: 'constraint', constraint: e.constraint }
               : { author: e.author, weight: e.weight, type: 'restaurant', after_id: e.after_id, note: '' });
-            const r = await post('/api/review', { sid: sid.value, edits: payload });
-            if (r.ok) { reviewResult.value = { auto_merged: r.auto_merged, conflicts: r.conflicts }; planData.value = r.merged_plan; gmv.value = r.merged_plan.gmv_estimate || gmv.value; refreshMap(); }
-            else { errorMsg.value = r.error; }
+            const rv = await post('/api/review', { sid: sid.value, edits: payload });
+            if (!rv.ok) { errorMsg.value = rv.error; isReviewing.value = false; return; }
+            reviewResult.value = { auto_merged: rv.auto_merged, conflicts: rv.conflicts };
+            // 撞车默认采纳"带权重的建议"，定稿出 v_next（裁决权仍在用户：不满意可继续加要求再生成）
+            const resolutions = {};
+            (rv.conflicts || []).forEach((c, i) => resolutions[String(i)] = 'suggestion');
+            const rs = await post('/api/resolve', { sid: sid.value, resolutions });
+            planData.value = rs.ok ? rs.plan : rv.merged_plan;
+            gmv.value = planData.value.gmv_estimate || gmv.value;
+            refreshMap();
+            edits.value = [];            // 这一轮已并入，清空队列，等下一轮
+            reach(3);                    // 去"定稿确认"看新方案
+            window.scrollTo({ top: 0, behavior: 'smooth' });
           } catch (e) { errorMsg.value = '' + e; }
           isReviewing.value = false;
         };
 
-        const resolveAndExecute = async () => {
-          isReviewing.value = true;
-          try {
-            const resolutions = {};
-            (reviewResult.value.conflicts || []).forEach((c, i) => resolutions[String(i)] = 'suggestion');
-            const r = await post('/api/resolve', { sid: sid.value, resolutions });
-            if (r.ok) { planData.value = r.plan; gmv.value = r.plan.gmv_estimate || gmv.value; }
-          } catch (e) {}
-          isReviewing.value = false;
-          await goExecute();
-        };
-
-        // ---- 步骤4：真实执行 ----
+        // ---- 步骤5：真实执行 ----
         const goExecute = async () => {
-          reach(3);
+          reach(4);
           window.scrollTo({ top: 0, behavior: 'smooth' });
           isExecuting.value = true;
           execLogs.value = [];
@@ -1314,13 +1575,23 @@ PAGE = r"""<!doctype html>
         // ---- 流程控制 ----
         const goto = (n) => { if (n <= maxReached.value) currentStep.value = n; };
         const reach = (n) => { maxReached.value = Math.max(maxReached.value, n); goto(n); };
-        const resetFlow = () => { maxReached.value = 0; currentStep.value = 0; planData.value = null; edits.value = []; reviewResult.value = null; execLogs.value = []; business.value = null; hasCard.value = false; gmv.value = 0; sid.value = ''; shareUrl.value = ''; form.value.goal = ''; errorMsg.value = ''; };
+        const resetFlow = () => { maxReached.value = 0; currentStep.value = 0; planData.value = null; edits.value = []; newConstraint.value = ''; reviewResult.value = null; execLogs.value = []; business.value = null; hasCard.value = false; gmv.value = 0; sid.value = ''; shareUrl.value = ''; form.value.goal = ''; errorMsg.value = ''; };
 
         // ---- 展示辅助 ----
-        const getIcon = (type) => ({ choose_activity: '🎨', choose_restaurant: '🍽️', send_gift: '🎁', set_budget: '💰', set_return_time: '🕖', nap_window: '😴', child_safety: '🧒' }[type] || '✨');
+        const getIcon = (type) => (type && type.indexOf('choose_activity') === 0) ? '🎨' : ({ choose_restaurant: '🍽️', send_gift: '🎁', set_budget: '💰', set_return_time: '🕖', nap_window: '😴', child_safety: '🧒' }[type] || '✨');
         const countDispo = (d) => planData.value ? planData.value.decisions.filter(x => x.disposition === d && !isResolved(x.status)).length : 0;
         const countDispoAll = (d) => planData.value ? planData.value.decisions.filter(x => x.disposition === d).length : 0;
         const isResolved = (status) => ['confirmed', 'done'].includes(status);
+        // "停下来问"给预设选项，更友好；仍保留"自己填"
+        const ASK_OPTIONS = {
+          set_budget: ['人均 80 以内', '人均 120 以内', '人均 200 左右', '人均 300 以上'],
+          set_return_time: ['17:30 前到家', '19:30 前到家', '21:30 前到家', '23:00 前回家'],
+        };
+        const askOptions = (type) => ASK_OPTIONS[type] || [];
+        const customAsk = ref({});
+        const pickAsk = (id, opt) => { answers.value[id] = opt; customAsk.value[id] = false; };
+        const pickCustom = (dec) => { customAsk.value[dec.id] = true; if (askOptions(dec.type).includes(answers.value[dec.id])) answers.value[dec.id] = ''; };
+        const unansweredAsks = () => planData.value ? planData.value.decisions.filter(d => d.disposition === 'ask' && !isResolved(d.status) && !(answers.value[d.id] || '').trim()).length : 0;
         const getCardStyle = (d) => ({ auto: 'bg-white border border-slate-100 shadow-sm', suggest: 'bg-white border border-amber-200/60 shadow-premium', ask: 'bg-white border-2 border-rose-400 shadow-premium-hover transform -translate-y-1' }[d] || 'bg-white border border-slate-100');
         const getIconBg = (d, status) => { if (isResolved(status)) return 'bg-slate-100 text-slate-400'; return { auto: 'bg-emerald-50 text-emerald-600', suggest: 'bg-amber-100 text-amber-600', ask: 'bg-rose-500 text-white shadow-md' }[d] || 'bg-slate-100'; };
         const getMinimalBadge = (dispo, status) => {
@@ -1354,10 +1625,11 @@ PAGE = r"""<!doctype html>
           activeTab, currentStep, maxReached, steps, gmv, trust, errorMsg, memorySummary,
           loc, area, locOk, locStatus, addrInput, detectLoc, lockAddr,
           form, examples, sid, isAnalyzing, planData, answers, suggestions, isSubmittingAnswers,
-          shareUrl, copied, edits, isReviewing, reviewResult, isExecuting, execLogs, business, hasCard, mapUrl,
+          shareUrl, copied, edits, newConstraint, isReviewing, reviewResult, isExecuting, execLogs, business, hasCard, mapUrl,
           demoLoading, demoText, checklist, stLoading, stResult,
-          startPlan, forgetMe, submitAnswers, copyShare, wifeFar, friendUpscale, allergy, runReview, resolveAndExecute, goExecute, openCard, resetFlow, runDemo, runSelftest,
-          goto, getIcon, countDispo, countDispoAll, isResolved, getCardStyle, getIconBg, getMinimalBadge
+          startPlan, forgetMe, submitAnswers, copyShare, wifeFar, friendUpscale, allergy, refine, regenerate, goExecute, openCard, resetFlow, runDemo, runSelftest,
+          goto, getIcon, countDispo, countDispoAll, isResolved, getCardStyle, getIconBg, getMinimalBadge,
+          askOptions, customAsk, pickAsk, pickCustom, unansweredAsks
         };
       }
     }).mount('#app');
