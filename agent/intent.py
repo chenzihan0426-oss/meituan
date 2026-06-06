@@ -103,6 +103,28 @@ def _parse_party(text: str):
     return None
 
 
+def parse_budget(text: str):
+    """从'人均120/预算200/200块以内'提取人均预算（数字）；没提到返回 None。"""
+    m = re.search(r"(?:人均|预算|每人|人手|花费|消费)\D{0,4}(\d{2,4})", text)
+    if not m:
+        m = re.search(r"(\d{2,4})\s*(?:块|元)", text)
+    if m:
+        n = int(m.group(1))
+        return n if 20 <= n <= 2000 else None
+    return None
+
+
+_RET_CTX = ("到家", "回家", "散场", "回去", "结束", "玩到", "之前回", "点回", "点前")
+
+
+def parse_return_time(text: str):
+    """用户说了'X点前到家/晚上9点回家/玩到10点'就提取出来；没提到返回 None。"""
+    if not any(k in text for k in _RET_CTX):
+        return None
+    m = re.search(r"((?:上午|中午|下午|晚上|傍晚|夜里|晚)?\s*\d{1,2}\s*(?:点半|点|[:：]\d{2}))", text)
+    return m.group(1).strip() if m else None
+
+
 def positive_cuisine(text: str):
     """从文本里识别'正向想吃的菜系'，跳过否定语境。返回 cui 或 None。
 
@@ -168,6 +190,15 @@ def parse_goal(text: str, use_llm: bool = False) -> Intent:
                     it.constraints["cuisine_raw"] = kw
                     it.constraints.pop("cuisine_pref", None)
                     break
+            # 用户已给的字段就别再追问：预算 / 到家时间（LLM 没给则关键词补）
+            if not it.constraints.get("budget_per_capita"):
+                b = parse_budget(text)
+                if b:
+                    it.constraints["budget_per_capita"] = b
+            if not it.constraints.get("return_time"):
+                rt = parse_return_time(text)
+                if rt:
+                    it.constraints["return_time"] = rt
             return it
         except Exception:
             pass   # 回退规则解析（PRD §8：AI 不灵也优雅）
@@ -256,14 +287,20 @@ def parse_goal(text: str, use_llm: bool = False) -> Intent:
         if m and not any(ch in m.group(1) for ch in "的地个点家饭顿啥东西好喝"):
             c["cuisine_raw"] = m.group(1)
 
-    # --- 显式列出'未知'（绝不默默填默认值）---
-    if "预算" not in t and "人均" not in t:
+    # --- 用户已给的字段就别再追问：提取预算 / 到家时间 ---
+    b = parse_budget(t)
+    if b:
+        c["budget_per_capita"] = b
+        intent.known.append(f"预算：人均 {b} 左右（你已说明）")
+    rt = parse_return_time(t)
+    if rt:
+        c["return_time"] = rt
+        intent.known.append(f"到家时间：{rt}（你已说明）")
+
+    # --- 只把'必要且缺失'的列入未知（非必要不追问）---
+    if not c.get("budget_per_capita"):
         intent.unknown.append("预算 / 餐厅消费档位？（完全未知，问错代价高）")
-    if "忌口" not in t and "过敏" not in t:
-        intent.unknown.append("孩子忌口 / 吃不吃辣？（影响选店）")
-    if intent.flags.get("emotional_diet"):
-        intent.unknown.append("老婆减肥忌口到什么程度？（是否完全戒糖）")
-    if not any(k in t for k in ("几点", "到家", "回家")):
+    if not c.get("return_time"):
         intent.unknown.append("几点必须到家 / 散场？（影响整条时间线，错了全盘崩）")
 
     # --- 礼物意图（攒局通常想给个惊喜）---

@@ -176,6 +176,8 @@ def _apply_trust(plan, constraints: dict, party: int) -> dict:
                "set_return_time": ("return_time", lambda v: str(v))}
     for d in plan.decisions:                       # ① 信任'默认填'：你反复确认过的，默认替你填好，但仍可改
         if d.type in _UNLOCK and confirms.get(d.type, 0) >= 2:
+            if d.chosen is not None or d.status == Status.CONFIRMED:
+                continue                           # 这次你已经在目标里说明了，别用历史覆盖
             key, fmt = _UNLOCK[d.type]
             val = saved.get(key)
             if val in (None, "", []):

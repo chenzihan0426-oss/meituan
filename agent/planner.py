@@ -85,34 +85,52 @@ def build_first_plan(intent: Intent, tb: ToolBox, party_size: int = 3) -> Plan:
     rest_opts = [_opt_from_restaurant(r) for r in rests]
     decisions.append(_build_restaurant_decision(rest_opts, c, has_child))
 
-    # ---- 4. 餐厅消费档位：预算未知 + 问错代价高 -> 停下来问（验收 #2）----
-    budget_conf, budget_basis = rules.confidence_from_factors(0.50, [
-        ("预算完全未知", -0.15),
-        ("问错代价高（可能直接超预算、孩子也未必吃得惯）", -0.05),
-    ])
-    decisions.append(_mk(
-        "set_budget", "餐厅消费档位",
-        confidence=budget_conf, basis=budget_basis,
-        cost=Cost.HIGH,
-        reasoning="这家人均不高（~¥85），但若您本想升级到人均 300 的精致餐厅，我不敢替您定——"
-                  "请确认：控制在人均 100 左右，还是放开到 300？",
-        counterfactual="如果我自作主张定了人均 300 那家：可能直接超你预算、孩子也未必吃得惯——"
-                       "钱花出去难收回，所以这条我没敢替你定。",
-    ))
+    # ---- 4. 餐厅消费档位：用户已说就直接确认，不再追问；没说才停下来问（验收 #2）----
+    if c.get("budget_per_capita"):
+        bp = int(c["budget_per_capita"])
+        bdec = _mk("set_budget", "餐厅消费档位",
+                   chosen=Option(label=f"人均 {bp} 以内", kind="value"),
+                   confidence=0.9, basis=f"你已说明：人均 {bp} 左右",
+                   cost=Cost.LOW, reasoning=f"按你说的人均 {bp} 来，已据此选店——无需再问。")
+        bdec.status = Status.CONFIRMED
+        decisions.append(bdec)
+    else:
+        budget_conf, budget_basis = rules.confidence_from_factors(0.50, [
+            ("预算完全未知", -0.15),
+            ("问错代价高（可能直接超预算、孩子也未必吃得惯）", -0.05),
+        ])
+        decisions.append(_mk(
+            "set_budget", "餐厅消费档位",
+            confidence=budget_conf, basis=budget_basis,
+            cost=Cost.HIGH,
+            reasoning="这家人均不高（~¥85），但若您本想升级到人均 300 的精致餐厅，我不敢替您定——"
+                      "请确认：控制在人均 100 左右，还是放开到 300？",
+            counterfactual="如果我自作主张定了人均 300 那家：可能直接超你预算、孩子也未必吃得惯——"
+                           "钱花出去难收回，所以这条我没敢替你定。",
+        ))
 
-    # ---- 5. 几点到家：影响整条时间线，错了全盘崩 -> 停下来问（验收 #2）----
-    ret_conf, ret_basis = rules.confidence_from_factors(0.50, [
-        ("到家时刻完全未知", -0.15),
-        ("它决定整条时间线，错了全盘崩", -0.10),
-    ])
-    decisions.append(_mk(
-        "set_return_time", "几点必须到家",
-        confidence=ret_conf, basis=ret_basis,
-        cost=Cost.HIGH,
-        reasoning="请确认今天几点前要到家？（默认按 19:30 排，但不敢替您拍板）",
-        counterfactual="如果我按默认 19:30 硬排：万一你其实要早回接老人/孩子要睡，整条行程全得推翻——"
-                       "影响面太大，所以先问你一句。",
-    ))
+    # ---- 5. 几点到家：用户已说就直接确认；没说才停下来问（影响整条时间线，验收 #2）----
+    if c.get("return_time"):
+        rt = str(c["return_time"])
+        rdec = _mk("set_return_time", "几点必须到家",
+                   chosen=Option(label=rt, kind="value"),
+                   confidence=0.9, basis=f"你已说明：{rt}",
+                   cost=Cost.LOW, reasoning=f"按你说的「{rt}」倒排整条行程——无需再问。")
+        rdec.status = Status.CONFIRMED
+        decisions.append(rdec)
+    else:
+        ret_conf, ret_basis = rules.confidence_from_factors(0.50, [
+            ("到家时刻完全未知", -0.15),
+            ("它决定整条时间线，错了全盘崩", -0.10),
+        ])
+        decisions.append(_mk(
+            "set_return_time", "几点必须到家",
+            confidence=ret_conf, basis=ret_basis,
+            cost=Cost.HIGH,
+            reasoning="请确认今天几点前要到家？（默认按 19:30 排，但不敢替您拍板）",
+            counterfactual="如果我按默认 19:30 硬排：万一你其实要早回接老人/孩子要睡，整条行程全得推翻——"
+                           "影响面太大，所以先问你一句。",
+        ))
 
     # ---- 6. 留不留午睡口子：中置信 + 低代价 -> 给建议（验收 #3，仅亲子出游）----
     if has_child and wants_activity:
