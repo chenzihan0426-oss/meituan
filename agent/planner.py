@@ -329,8 +329,13 @@ def _dist_of(dec) -> float:
     return 3.0
 
 
+def _activity_decisions(plan: Plan) -> list:
+    """全部活动决定（支持多活动并存：choose_activity / choose_activity_2 …），按出现顺序。"""
+    return [d for d in plan.decisions if d.type.startswith("choose_activity") and d.chosen]
+
+
 def _build_timeline(plan: Plan, c: dict) -> list[Slot]:
-    act = plan.find_by_type("choose_activity")
+    acts = _activity_decisions(plan)
     rest = plan.find_by_type("choose_restaurant")
     nap = plan.find_by_type("nap_window")
     gift = plan.find_by_type("send_gift")
@@ -345,13 +350,15 @@ def _build_timeline(plan: Plan, c: dict) -> list[Slot]:
     if nap and nap.chosen:
         blocks.append({"dur": 40, "title": "孩子午睡口子",
                        "note": "5 岁娃下午易困，先补觉（建议项，待您定）"})
-    if act and act.chosen:
+    for n, act in enumerate(acts):
         ad = _dist_of(act)
-        blocks.append({"dur": _travel_minutes(ad), "title": "出发去玩",
-                       "note": f"离家约 {ad}km", "travel": True})
+        blocks.append({"dur": _travel_minutes(ad),
+                       "title": "出发去玩" if n == 0 else "前往下一站",
+                       "note": (f"离家约 {ad}km" if n == 0 else f"约 {ad}km，顺路下一站"), "travel": True})
         adur = int(round(float(act.chosen.get("duration_h", 2.0) or 2.0) * 60))
         blocks.append({"dur": adur, "title": act.chosen.label,
                        "note": act.reasoning.split("；")[0]})
+    if acts:
         blocks.append({"dur": _travel_minutes(_dist_of(rest)), "title": "前往餐厅",
                        "note": "顺路过去", "travel": True})
     if rest and rest.chosen:
@@ -421,8 +428,7 @@ def _build_timeline(plan: Plan, c: dict) -> list[Slot]:
 def estimate_gmv(plan: Plan, party_size: int = 3) -> float:
     """本方案预计撬动的交易额（PRD §10：商业价值在产品里'做'出来）。"""
     total = 0.0
-    act = plan.find_by_type("choose_activity")
-    if act and act.chosen:
+    for act in _activity_decisions(plan):                 # 多活动并存：逐个累计
         total += (act.chosen.price or 0) * party_size
     rest = plan.find_by_type("choose_restaurant")
     if rest and rest.chosen:

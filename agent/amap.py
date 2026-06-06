@@ -374,6 +374,12 @@ def amap_restaurants(goal: str, constraints: dict, n: int = 10) -> list[dict]:
                  "show_fields": "business"})
     pois = [p for p in (data.get("pois") or []) if p.get("name") and _is_meal(p)]
     out = [_infer_restaurant(p) for p in pois]
+    # 过敏是硬约束：直接把触犯过敏原的店剔出候选，安全永远压过口味偏好
+    # （否则'不吃海鲜'还可能因'海鲜'被当口味而把海鲜店排上来）。
+    banned = set(constraints.get("allergens") or [])
+    if banned:
+        safe = [r for r in out if not (banned & set(r.get("allergens") or []))]
+        out = safe if safe else out      # 万一全被排掉，保底返回原集（上层大脑会标注）
     if not out:
         raise AmapError("高德无餐厅结果")
     if pref:   # 点名了口味：把对口的排前面，保证候选里有它（大脑再据此打分）

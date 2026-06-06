@@ -29,6 +29,16 @@ ACTIVITY_PREF_LABEL = {
 }
 
 
+def all_activity_cats(text: str) -> list:
+    """文本里提到的所有活动类别（去重保序）——支持'一次加多个活动'（唱K + 游乐园）。"""
+    low = text.lower()
+    out = []
+    for cat, kws in ACTIVITY_PREF.items():
+        if any(k in low for k in kws) and cat not in out:
+            out.append(cat)
+    return out
+
+
 def _scan_activity(text: str) -> tuple:
     """从目标里识别'想去的活动类型'。返回 (已知类别 或 None, 用户原话 或 None)。
 
@@ -59,6 +69,29 @@ CUISINE_PREF = {
     "轻食": ["轻食", "沙拉", "健康餐", "减脂餐", "健身餐"],
     "家常": ["家常", "中餐", "炒菜", "西北菜", "面馆"],
 }
+
+# 否定词：出现在菜系词前/后表示'不想要'，绝不能当成'想吃'（'不吃海鲜''海鲜过敏'≠想吃海鲜）
+_CUISINE_NEG = ("不", "别", "忌", "讨厌", "没", "少", "戒", "怕")
+
+
+def positive_cuisine(text: str):
+    """从文本里识别'正向想吃的菜系'，跳过否定语境。返回 cui 或 None。
+
+    例：'想吃海鲜'→海鲜；'有人不吃海鲜'→None；'海鲜过敏'→None。
+    """
+    for cui, kws in CUISINE_PREF.items():
+        for kw in kws:
+            start = 0
+            while True:
+                i = text.find(kw, start)
+                if i == -1:
+                    break
+                pre = text[max(0, i - 2):i]
+                suf = text[i + len(kw):i + len(kw) + 2]
+                if not any(n in pre for n in _CUISINE_NEG) and "过敏" not in suf:
+                    return cui      # 命中一个无否定语境的正向提及
+                start = i + 1
+    return None
 
 
 @dataclass
@@ -119,6 +152,14 @@ def parse_goal(text: str, use_llm: bool = False) -> Intent:
         c["need_low_cal"] = True
         intent.flags["emotional_diet"] = True
 
+    # --- 过敏 / 忌口（'不吃海鲜''海鲜过敏''忌花生'）→ 硬约束，避开相关店 ---
+    for a in ("海鲜", "花生", "坚果", "乳制品", "牛奶", "鸡蛋", "麸质", "大豆", "芒果", "虾", "蟹"):
+        if any(p in t for p in (f"不吃{a}", f"{a}过敏", f"对{a}过敏", f"忌{a}", f"不能吃{a}", f"{a}忌口")):
+            c.setdefault("allergens", [])
+            if a not in c["allergens"]:
+                c["allergens"].append(a)
+            intent.known.append(f"有人不吃/忌{a} → 硬约束，避开{a}相关的店")
+
     # --- 地理约束 ---
     if any(k in t for k in ("别离家太远", "别太远", "附近", "近一点", "离家近")):
         intent.known.append("别离家太远（地理约束）→ 控制在 ~10km 内")
@@ -144,12 +185,11 @@ def parse_goal(text: str, use_llm: bool = False) -> Intent:
     if any(k in t for k in ("玩", "出去", "出门", "逛", "活动", "景点", "游")):
         intent.flags["wants_activity"] = True
 
-    # --- 你想吃的'菜系/口味'（据此选店，而不是来回那一家）---
-    for cui, kws in CUISINE_PREF.items():
-        if any(k in t for k in kws):
-            c["cuisine_pref"] = cui
-            intent.known.append(f"想吃的口味：{cui}（按此优先选店）")
-            break
+    # --- 你想吃的'菜系/口味'（据此选店；'不吃X/X过敏'不算想吃）---
+    cui = positive_cuisine(t)
+    if cui:
+        c["cuisine_pref"] = cui
+        intent.known.append(f"想吃的口味：{cui}（按此优先选店）")
     # 没命中已知菜系，但明确说了"想吃X"——也别装没听见，记下来好诚实回应
     if "cuisine_pref" not in c:
         m = re.search(r"(?:想吃|要吃|爱吃|来点|整点|想整点|馋)([一-龥]{2,4})", t)
