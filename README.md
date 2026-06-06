@@ -67,7 +67,7 @@ python3 run_demo.py friends          # 朋友局泛化（2男2女、口味不一
 # 真人交互 CLI（用 `as 老婆` 切视角去改方案）
 python3 -m agent.cli
 
-# 图形化验收台（本地网页，零依赖；切场景/裁决冲突，左侧 9 条验收清单自动打勾）
+# 图形化 WebUI（本地网页，零依赖）：一句话 → 方案确认 → 协同反馈 → 定稿 → 执行 + 朋友协同分享
 python3 -m agent.web                  # 浏览器开 http://127.0.0.1:8000
 
 # 自检（守灵魂字段 + 主轴规则 + 验收瞬间，93 项断言）
@@ -97,12 +97,12 @@ agent/
   review.py        # 协同评审回合：自动合并 + 冲突建议 + 再规划
   execution.py     # 执行 + 异常兜底（满了/超时重试/失败回滚）+ GMV 计数
   orchestrator.py  # 端到端编排（被 demo / cli / web 复用）
-  web.py           # 图形化验收台 + 朋友协同分享页（标准库 http.server，零依赖）
+  web.py           # 图形化 WebUI + 朋友协同分享页（标准库 http.server，零依赖）
   card.py          # "递给老婆/发小张"的移动端可分享方案卡（自包含 HTML）
   llm.py/llm_tools.py # 可选 AI 层：意图解析 + 候选生成（OpenAI 兼容，带缓存+回退）
   demo.py / cli.py # 自动演示 / 真人交互入口
 check_acceptance.py  # 命令行验收自检（对照 9 条瞬间）
-DESIGN.md            # ≤2 页设计文档    PITCH.md  路演手册
+DESIGN.md            # ≤2 页设计文档
 ```
 
 ---
@@ -115,4 +115,4 @@ DESIGN.md            # ≤2 页设计文档    PITCH.md  路演手册
 
 > 当前状态：内部逻辑自检 **93/93** ✅ · PRD 9 条验收瞬间 **9/9** ✅
 
-详见 `DESIGN.md`（设计）与 `PITCH.md`（路演）。
+详见 `DESIGN.md`（设计）与 `交付说明.md`（提交导航）。
