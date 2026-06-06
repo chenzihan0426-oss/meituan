@@ -328,27 +328,52 @@ def _infer_restaurant(poi: dict) -> dict:
     }
 
 
+# 非正餐 POI：咖啡/奶茶/甜品/面包/便利店…没人专程去这些"用餐"，从正餐候选里剔除
+_NON_MEAL_KW = ("咖啡", "瑞幸", "星巴克", "luckin", "奶茶", "喜茶", "奈雪", "茶饮", "茶餐",
+                "果汁", "甜品", "蛋糕", "烘焙", "面包", "冰淇淋", "冰激凌", "便利店", "酒吧")
+# 正餐 typecode：中餐厅|外国餐厅|快餐厅（排除 0505 咖啡/0506 茶/0507 冷饮/0508 糕饼/0509 甜品）
+_MEAL_TYPES = "050100|050200|050300"
+
+
+def _is_meal(poi: dict) -> bool:
+    """是不是'能正经吃顿饭'的店——把咖啡/奶茶/甜品/面包这类排掉。"""
+    name = (poi.get("name") or "")
+    if any(k in name.lower() for k in _NON_MEAL_KW):
+        return False
+    code = str(poi.get("typecode") or "")
+    if code[:4] in ("0505", "0506", "0507", "0508", "0509"):
+        return False
+    return True
+
+
 def amap_restaurants(goal: str, constraints: dict, n: int = 10) -> list[dict]:
-    loc = search_center(constraints)
     pref = constraints.get("cuisine_pref")
-    types = "050000"   # 餐饮服务
+    near = constraints.get("near_dining_loc")
+    # 动线优化：没点名特定口味时，就在'要去的活动'附近吃（同商圈/同综合体），不凭空多跑一趟；
+    # 点名了某口味，才值得专程从你的位置往外搜（这正是"除非要吃特定的菜"那条）。
+    if near and not pref:
+        loc = near
+        radius = 2000
+    else:
+        loc = search_center(constraints)
+        radius = int((constraints.get("max_distance_km") or 10) * 1000)
+        radius = max(3000, min(50000, radius))
     if pref and pref in CUISINE_TYPECODE:
         types = CUISINE_TYPECODE[pref]   # 用精确 typecode 严格搜该口味
         kw = pref
     elif pref:
-        kw = pref
+        types, kw = "050000", pref
     elif constraints.get("need_low_cal"):
-        kw = "轻食 餐厅"
+        types, kw = _MEAL_TYPES, "轻食 简餐"
     elif constraints.get("need_child_friendly"):
-        kw = "亲子餐厅"
+        types, kw = _MEAL_TYPES, "餐厅"
     else:
-        kw = "美食"
-    radius = int((constraints.get("max_distance_km") or 10) * 1000)
-    radius = max(3000, min(50000, radius))
+        types, kw = _MEAL_TYPES, "餐厅"
     data = _get({"location": loc, "keywords": kw, "types": types,
-                 "radius": radius, "page_size": min(20, max(5, n)),
+                 "radius": radius, "page_size": min(25, max(8, n * 2)),
                  "show_fields": "business"})
-    out = [_infer_restaurant(p) for p in (data.get("pois") or []) if p.get("name")]
+    pois = [p for p in (data.get("pois") or []) if p.get("name") and _is_meal(p)]
+    out = [_infer_restaurant(p) for p in pois]
     if not out:
         raise AmapError("高德无餐厅结果")
     if pref:   # 点名了口味：把对口的排前面，保证候选里有它（大脑再据此打分）

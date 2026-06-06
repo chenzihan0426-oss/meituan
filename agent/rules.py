@@ -50,6 +50,27 @@ def derive_disposition(confidence: float, cost: Cost,
 
 
 # ---------------------------------------------------------------------------
+# 把'固定决策'的置信度也算出来（而非拍一个魔法数字）
+# ---------------------------------------------------------------------------
+def confidence_from_factors(base: float, factors: list[tuple[str, float]]) -> tuple[float, str]:
+    """从'基准 + 一串带理由的加减项'累加出置信度，并返回可在屏幕上指读的算式。
+
+    这是为了让每个 confidence 都'算得出、说得清'：不是拍 0.30，而是
+    '基准 0.50 −0.15（预算完全未知）−0.05（问错代价高）= 0.30'。
+    餐厅打分(score_restaurant)早就是这么算的；此函数把'孩子常识/预算/到家时间'
+    这类固定决策也纳入同一套可解释口径，堵住'你这数字哪来的'之问。
+    """
+    conf = base
+    parts = [f"基准 {base:.2f}"]
+    for label, delta in factors:
+        conf += delta
+        sign = "+" if delta >= 0 else "−"
+        parts.append(f"{sign}{abs(delta):.2f}（{label}）")
+    conf = max(0.05, min(0.97, conf))
+    return round(conf, 2), "　".join(parts) + f"　= {conf:.2f}"
+
+
+# ---------------------------------------------------------------------------
 # 给餐厅候选项打分：根据它满足了多少'已知约束'算置信度（可解释）
 # ---------------------------------------------------------------------------
 def score_restaurant(opt: Option, constraints: dict) -> tuple[float, str, str]:
