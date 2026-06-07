@@ -102,12 +102,18 @@ def _get(params: dict) -> dict:
                 return json.load(f)
         except Exception:
             pass
-    try:
-        with urllib.request.urlopen(url, timeout=_cfg().get("timeout", 30),
-                                    context=llm._ssl_context({})) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-    except Exception as e:  # noqa
-        raise AmapError(f"高德请求失败：{e}")
+    data, last = None, None
+    for _ in range(3):                     # 偶发 TLS/网络抖动 → 带 UA 重试，别轻易掉回 mock
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=_cfg().get("timeout", 30),
+                                        context=llm._ssl_context({})) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            break
+        except Exception as e:  # noqa
+            last, data = e, None
+    if data is None:
+        raise AmapError(f"高德请求失败：{last}")
     if str(data.get("status")) != "1":
         raise AmapError(f"高德返回错误：{data.get('info')}（{data.get('infocode')}）")
     if _cfg().get("cache", True):
@@ -132,12 +138,18 @@ def _api(base: str, params: dict, cache: bool = True) -> dict:
                 return json.load(f)
         except Exception:
             pass
-    try:
-        with urllib.request.urlopen(url, timeout=_cfg().get("timeout", 30),
-                                    context=llm._ssl_context({})) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-    except Exception as e:  # noqa
-        raise AmapError(f"高德请求失败：{e}")
+    data, last = None, None
+    for _ in range(3):                     # 偶发 TLS/网络抖动 → 带 UA 重试，别轻易掉回 mock
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=_cfg().get("timeout", 30),
+                                        context=llm._ssl_context({})) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            break
+        except Exception as e:  # noqa
+            last, data = e, None
+    if data is None:
+        raise AmapError(f"高德请求失败：{last}")
     if str(data.get("status")) != "1":
         raise AmapError(f"高德返回错误：{data.get('info')}（{data.get('infocode')}）")
     if cache and _cfg().get("cache", True):

@@ -184,13 +184,14 @@ def _pick_activity(opts: list[Option], c: dict, has_child: bool) -> tuple[Option
             reason = f"按你想去的「{label}」优先：选 {chosen.label}（{chosen.get('distance_km')}km）"
             reason += f"；同类还可选：{others}" if others else ""
             return chosen, 0.86, f"命中你点名的「{label}」类，且已按约束筛过", reason
-        # 这类场所本地数据里没有 -> 老实说，不偷偷换个别的（降到'建议'让你定）
+        # 这类场所当前数据里没有 -> 老实说 + 给可操作的出路（多半是没开真实数据，内置示例库没有 KTV 等）
         pool = candidates or opts
         pool.sort(key=lambda o: o.get("distance_km") or 99)
         chosen = pool[0]
         return (chosen, 0.45,
-                f"附近暂没有「{label}」类场所（Mock 数据所限）",
-                f"你想去「{label}」，但库里没有这类；先给最接近的 {chosen.label}，你也可以换个说法或我再找")
+                f"当前数据里没有「{label}」类场所",
+                f"你想去「{label}」，但内置示例库没有这类——勾选输入框旁的『真实地理数据』就能搜到附近真实的{label}；"
+                f"暂先占位为最近的 {chosen.label}，你也可以换个说法。")
 
     if has_child:
         # 儿童友好 + 距离近优先

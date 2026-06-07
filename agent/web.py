@@ -1084,6 +1084,30 @@ PAGE = r"""<!doctype html>
                 <p class="text-slate-500 text-[15px]">我替你处理了 <b class="text-emerald-600 font-semibold">{{ countDispoAll('auto') }}</b> 件、给了 <b class="text-amber-600 font-semibold">{{ countDispoAll('suggest') }}</b> 条建议，只回头问你 <b class="text-rose-500 font-semibold">{{ countDispoAll('ask') }}</b> 件——这几件只有你知道，我不替你瞎猜。</p>
               </div>
 
+              <!-- 智能时间线（放最上：先看清整条行程） -->
+              <div v-if="planData.timeline && planData.timeline.length" class="bg-white rounded-3xl shadow-sm border border-slate-100 p-6 md:p-8 mb-6">
+                <div class="text-[11px] font-bold text-slate-400 uppercase tracking-widest mb-5">⏱️ 智能时间线（按"几点到家"倒排）</div>
+                <div class="space-y-3">
+                  <div v-for="(s, i) in planData.timeline" :key="i" class="flex gap-4 items-start">
+                    <div class="text-[13px] font-mono font-bold text-slate-400 w-24 shrink-0 pt-0.5">{{ s.start }}<span v-if="s.end !== s.start">–{{ s.end }}</span></div>
+                    <div class="flex-1 border-l-2 border-slate-100 pl-4 pb-2">
+                      <div :class="['text-[14px] font-bold', s.title.includes('⚠️') ? 'text-rose-500' : 'text-slate-800']">{{ s.title }}</div>
+                      <div class="text-[12px] text-slate-400 mt-0.5">{{ s.reason }}</div>
+                    </div>
+                  </div>
+                </div>
+                <div v-if="planData.tips && planData.tips.length" class="mt-6 pt-5 border-t border-slate-100 space-y-2">
+                  <div v-for="(t, i) in planData.tips" :key="i" class="text-[13px] text-slate-500 leading-relaxed">{{ t.icon }} {{ t.text }}</div>
+                </div>
+              </div>
+
+              <!-- 高德地图（紧接时间线） -->
+              <div v-if="mapUrl && !mapHidden" class="bg-white rounded-3xl shadow-sm border border-slate-100 p-4 mb-6">
+                <div class="text-[11px] font-bold text-slate-400 uppercase tracking-widest mb-3 px-2">🗺️ 真实路线（高德实景 · 家①→玩②→吃③，评委可当场搜证）</div>
+                <img :src="mapUrl" @error="mapHidden = true" class="w-full rounded-2xl" alt="高德真实路线图">
+              </div>
+
+              <!-- 需要你确认 / 已替你定的决定 -->
               <div class="space-y-6">
                 <transition-group name="list">
                   <div v-for="(dec, idx) in planData.decisions" :key="dec.id" :class="['relative transition-all duration-500 rounded-3xl p-6 md:p-8', isResolved(dec.status) ? 'bg-transparent border border-slate-200 opacity-60' : getCardStyle(dec.disposition)]" :style="{ transitionDelay: `${idx * 80}ms` }">
@@ -1157,29 +1181,6 @@ PAGE = r"""<!doctype html>
                 </transition-group>
               </div>
 
-              <!-- 时间线（含倒排 + 排不开提示） -->
-              <div v-if="planData.timeline && planData.timeline.length" class="mt-10 bg-white rounded-3xl shadow-sm border border-slate-100 p-6 md:p-8">
-                <div class="text-[11px] font-bold text-slate-400 uppercase tracking-widest mb-5">⏱️ 智能时间线（按"几点到家"倒排）</div>
-                <div class="space-y-3">
-                  <div v-for="(s, i) in planData.timeline" :key="i" class="flex gap-4 items-start">
-                    <div class="text-[13px] font-mono font-bold text-slate-400 w-24 shrink-0 pt-0.5">{{ s.start }}<span v-if="s.end !== s.start">–{{ s.end }}</span></div>
-                    <div class="flex-1 border-l-2 border-slate-100 pl-4 pb-2">
-                      <div :class="['text-[14px] font-bold', s.title.includes('⚠️') ? 'text-rose-500' : 'text-slate-800']">{{ s.title }}</div>
-                      <div class="text-[12px] text-slate-400 mt-0.5">{{ s.reason }}</div>
-                    </div>
-                  </div>
-                </div>
-                <div v-if="planData.tips && planData.tips.length" class="mt-6 pt-5 border-t border-slate-100 space-y-2">
-                  <div v-for="(t, i) in planData.tips" :key="i" class="text-[13px] text-slate-500 leading-relaxed">{{ t }}</div>
-                </div>
-              </div>
-
-              <!-- 真实路线地图（高德实景，仅"真实地理数据"开启时出） -->
-              <div v-if="mapUrl && !mapHidden" class="mt-8 bg-white rounded-3xl shadow-sm border border-slate-100 p-4">
-                <div class="text-[11px] font-bold text-slate-400 uppercase tracking-widest mb-3 px-2">🗺️ 真实路线（高德实景 · 家①→玩②→吃③，评委可当场搜证）</div>
-                <img :src="mapUrl" @error="mapHidden = true" class="w-full rounded-2xl" alt="高德真实路线图">
-              </div>
-
               <div class="fixed bottom-8 left-1/2 -translate-x-1/2 w-[calc(100%-3rem)] max-w-3xl z-40 bg-slate-900/90 backdrop-blur-2xl rounded-3xl p-3 shadow-2xl border border-white/10 flex items-center justify-between">
                 <div class="text-white text-sm font-medium px-4 flex items-center gap-3">
                   <div v-if="unansweredAsks() > 0" class="relative flex h-3 w-3"><span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-rose-400 opacity-75"></span><span class="relative inline-flex rounded-full h-3 w-3 bg-rose-500"></span></div>
@@ -1196,6 +1197,28 @@ PAGE = r"""<!doctype html>
                 <div class="w-16 h-16 rounded-3xl bg-indigo-100 text-indigo-500 mx-auto flex items-center justify-center text-3xl mb-6 shadow-sm">👥</div>
                 <h2 class="text-3xl font-extrabold tracking-tight text-slate-900 mb-3">还想调整？提点要求再生成</h2>
                 <p class="text-slate-500 text-[15px] max-w-lg mx-auto">把链接发给同行的人各自改，或自己加要求。AI 合并后会先把<b class="text-slate-700">新方案给你过目</b>，满意了你再决定执行。</p>
+              </div>
+
+              <!-- 当前方案速览：先看清现在的方案与路线，再决定加什么要求 -->
+              <div v-if="planData" class="bg-white/80 backdrop-blur-xl border border-white/60 rounded-[2rem] shadow-premium p-6 md:p-7 mb-6">
+                <div class="text-[11px] font-bold text-slate-400 uppercase tracking-widest mb-4">当前方案<span v-if="planData.version"> · v{{ planData.version }}</span></div>
+                <div class="space-y-2.5 mb-1">
+                  <div v-for="dec in planData.decisions" :key="dec.id" v-show="dec.chosen" class="flex items-start gap-3 text-[14px]">
+                    <span class="text-lg shrink-0 leading-tight">{{ getIcon(dec.type) }}</span>
+                    <span class="text-slate-400 shrink-0">{{ dec.description }}：</span>
+                    <span class="font-semibold text-slate-800">{{ dec.chosen && dec.chosen.label }}</span>
+                  </div>
+                </div>
+                <div v-if="planData.timeline && planData.timeline.length" class="space-y-2 pt-4 mt-3 border-t border-slate-100">
+                  <div v-for="(s, i) in planData.timeline" :key="i" class="flex gap-3 text-[13px]">
+                    <span class="font-mono font-bold text-slate-400 w-24 shrink-0">{{ s.start }}<span v-if="s.end !== s.start">–{{ s.end }}</span></span>
+                    <span :class="s.title.includes('⚠️') ? 'text-rose-500 font-semibold' : 'text-slate-700 font-medium'">{{ s.title }}</span>
+                  </div>
+                </div>
+                <div v-if="mapUrl && !mapHidden" class="mt-5">
+                  <div class="text-[11px] font-bold text-slate-400 uppercase tracking-widest mb-3">🗺️ 真实路线（家①→玩②→吃③）</div>
+                  <img :src="mapUrl" @error="mapHidden = true" class="w-full rounded-2xl" alt="高德真实路线图">
+                </div>
               </div>
 
               <div v-if="shareUrl" class="bg-white rounded-2xl shadow-sm border border-slate-100 p-5 mb-6 flex items-center gap-3">
@@ -1281,7 +1304,7 @@ PAGE = r"""<!doctype html>
               <div v-if="planData.tips && planData.tips.length" class="bg-gradient-to-br from-rose-50/70 to-orange-50/70 rounded-3xl border border-rose-100/60 p-6 md:p-8 mb-6">
                 <div class="text-[11px] font-bold text-rose-400 uppercase tracking-widest mb-4">🤝 出发前，几句出行提醒</div>
                 <div class="space-y-2.5">
-                  <div v-for="(t, i) in planData.tips" :key="i" class="text-[14px] text-slate-600 leading-relaxed">{{ t }}</div>
+                  <div v-for="(t, i) in planData.tips" :key="i" class="text-[14px] text-slate-600 leading-relaxed">{{ t.icon }} {{ t.text }}</div>
                 </div>
               </div>
 
@@ -1455,6 +1478,9 @@ PAGE = r"""<!doctype html>
             gmv.value = r.plan.gmv_estimate || 0;
             memorySummary.value = (r.memory && r.memory.summary) || '';
             answers.value = {}; suggestions.value = {}; customAsk.value = {};
+            // 重新生成时清掉上一轮协同/评审/执行状态，避免旧画面残留造成误解
+            edits.value = []; reviewResult.value = null; business.value = null;
+            hasCard.value = false; execLogs.value = []; mapHidden.value = false;
             planData.value.decisions.forEach(d => {
               if (d.disposition === 'suggest') suggestions.value[d.id] = true;
               if (d.disposition === 'ask' && d.prefill) {           // 信任默认填：预填上、可改
