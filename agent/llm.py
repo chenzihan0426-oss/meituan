@@ -44,6 +44,13 @@ def _load_config() -> dict:
         cfg["model"] = os.environ["AGENT_LLM_MODEL"]
     if os.environ.get("AGENT_LLM_ENABLED"):
         cfg["enabled"] = os.environ["AGENT_LLM_ENABLED"].lower() in ("1", "true", "yes")
+    # 高德 / 默认位置也可走环境变量（部署时线上没有 llm_config.json）
+    if os.environ.get("AGENT_AMAP_KEY"):
+        cfg["amap_key"] = os.environ["AGENT_AMAP_KEY"]
+    if os.environ.get("AGENT_HOME_LOCATION"):
+        cfg["home_location"] = os.environ["AGENT_HOME_LOCATION"]
+    if os.environ.get("AGENT_HOME_AREA"):
+        cfg["home_area"] = os.environ["AGENT_HOME_AREA"]
     if cfg.get("api_key") and cfg.get("base_url"):
         cfg.setdefault("enabled", True)
     return cfg
