@@ -20,9 +20,20 @@
 
 ---
 
-## 二、无需信用卡的部署（Render 要绑卡，用这些替代）
+## 二、无需信用卡的部署（Render/Koyeb/HF 现都可能要卡，优先用这个）
 
-### 方案 A：Koyeb（最像 Render，连 GitHub 自动部署，**免费且无需信用卡**）
+### 方案 0：Back4app Containers（实测注册不要卡，GitHub + Docker，跑全功能）⭐
+1. https://www.back4app.com → 注册（GitHub 登录，无需信用卡）。
+2. 选 **Containers / Container as a Service** → **Deploy from GitHub** → 选仓库 `chenzihan0426-oss/meituan`、分支 `main`。
+3. 自动识别 `Dockerfile`；**Container Port 填 `7860`**（容器监听此口）。
+4. **Environment Variables** 填 key（平台密钥，不进仓库）：
+   `AGENT_AMAP_KEY`、`AGENT_LLM_ENABLED=true`、`AGENT_LLM_BASE_URL`、`AGENT_LLM_API_KEY`、`AGENT_LLM_MODEL`。
+5. Deploy → 拿到网址发评委。常驻容器 → 内存会话正常、真实高德/LLM 可用。
+
+> 备注：Vercel/Netlify 虽不要卡，但它们是 **Serverless**，本产品的多步会话存在服务器内存里，
+> 在无服务器环境会频繁"会话过期"，不适合；要用就得把会话改存外部数据库（不划算）。
+
+### 方案 A：Koyeb（连 GitHub 自动部署；部分地区注册需验证/卡）
 1. https://www.koyeb.com → 用 **GitHub 登录**。
 2. **Create Web Service** → **GitHub** → 选仓库 `chenzihan0426-oss/meituan`、分支 `main`。
 3. Builder 选 **Dockerfile**（仓库已带 `Dockerfile`）；端口 Koyeb 会自动用 `$PORT`，无需改。
