@@ -20,7 +20,31 @@
 
 ---
 
-## 二、Render 部署（免费、最省事，推荐）
+## 二、无需信用卡的部署（Render 要绑卡，用这些替代）
+
+### 方案 A：Koyeb（最像 Render，连 GitHub 自动部署，**免费且无需信用卡**）
+1. https://www.koyeb.com → 用 **GitHub 登录**。
+2. **Create Web Service** → **GitHub** → 选仓库 `chenzihan0426-oss/meituan`、分支 `main`。
+3. Builder 选 **Dockerfile**（仓库已带 `Dockerfile`）；端口 Koyeb 会自动用 `$PORT`，无需改。
+4. **Environment variables** 填 key（平台密钥，不进仓库）：
+   `AGENT_AMAP_KEY`、`AGENT_LLM_ENABLED=true`、`AGENT_LLM_BASE_URL`、`AGENT_LLM_API_KEY`、`AGENT_LLM_MODEL`。
+5. Deploy → 拿到 `https://xxx.koyeb.app` 网址发评委。
+   > 免费档 1 个服务、无访问时 scale-to-zero（首次访问稍慢），不用卡、不过期。
+
+### 方案 B：Hugging Face Spaces（免费、无需信用卡、2 核 16G）
+1. https://huggingface.co 注册 → **New Space**。
+2. **Space SDK 选 Docker**（空白模板）；可见性 Public。
+3. 把本仓库文件传上去（网页上传，或 `git push` 到 Space 的仓库）——确保含 `Dockerfile` 与 `agent/`。
+   > Space 自带的 `README.md` 顶部要有 `sdk: docker`（建 Space 时自动生成的那份，保留它）。
+4. **Settings → Variables and secrets → New secret** 填上面那几个 key。
+5. 等容器构建完，Space 页面就是可用网址（监听 7860，HF 自动路由）。
+   > 免费档约 48 小时无访问休眠，有人访问会自动唤醒。
+
+> 两者都"无需信用卡"。Koyeb 操作最接近 Render；HF 资源更足但要把代码放到 HF 仓库。
+
+---
+
+## 三、Render 部署（需绑卡，备选）
 
 1. 代码推到 GitHub（已就绪：含 `Procfile`、`requirements.txt`、`render.yaml`）。
 2. 打开 https://render.com → New → **Web Service** → 连接本仓库。
@@ -36,7 +60,7 @@
 
 ---
 
-## 三、本地快速验证"部署形态"（用环境变量、不用配置文件）
+## 四、本地快速验证"部署形态"（用环境变量、不用配置文件）
 
 ```bash
 AGENT_AMAP_KEY=你的高德key \
@@ -48,7 +72,7 @@ PORT=8000 python -m agent.web
 
 ---
 
-## 四、给评委的话术（无需任何 key）
+## 五、给评委的话术（无需任何 key）
 
 > "在线版直接点网址体验全部功能；想本地跑的话，`python3 -m agent.web` 即可，**不填任何 key 也能完整演示**（内置示例库），真实高德/LLM 为可选增强。"
 
