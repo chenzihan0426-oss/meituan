@@ -276,6 +276,14 @@ def parse_goal(text: str, use_llm: bool = False) -> Intent:
     if any(k in t for k in ("玩", "出去", "出门", "逛", "活动", "景点", "游", "海边")):
         intent.flags["wants_activity"] = True
 
+    # --- 辣度偏好（初始目标里就说了'无辣不欢/怕辣'等，先判否定避免误判）---
+    if any(k in t for k in ("怕辣", "清淡", "不想吃辣", "不吃辣", "少辣", "微辣")):
+        c["avoid_spicy"] = True
+        intent.known.append("口味偏清淡 / 避免纯辣店")
+    elif any(k in t for k in ("无辣不欢", "重辣", "爱辣", "要辣", "辣口", "能吃辣", "嗜辣", "想吃辣", "爱吃辣", "重口味")):
+        c["need_spicy"] = True
+        intent.known.append("有人无辣不欢 → 确保有辣口菜")
+
     # --- 你想吃的'菜系/口味'（据此选店；'不吃X/X过敏'不算想吃）---
     cui = positive_cuisine(t)
     if cui:

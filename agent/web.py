@@ -910,11 +910,14 @@ def serve(port: int = 0, open_browser: bool = True):
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(description="活动规划 Agent · 图形化验收台")
+    ap = argparse.ArgumentParser(description="活动规划 Agent · 图形化 WebUI")
     ap.add_argument("--port", type=int, default=0)
     ap.add_argument("--no-open", action="store_true")
     args = ap.parse_args(argv)
-    serve(args.port, open_browser=not args.no_open)
+    env_port = os.environ.get("PORT")            # 云平台（Render/Railway/Fly 等）注入端口
+    port = int(env_port) if env_port else args.port
+    no_open = args.no_open or bool(env_port)     # 部署环境无浏览器，别尝试自动打开
+    serve(port, open_browser=not no_open)
 
 
 # ===========================================================================

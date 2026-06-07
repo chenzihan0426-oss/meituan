@@ -91,6 +91,8 @@ def score_restaurant(opt: Option, constraints: dict) -> tuple[float, str, str]:
         else:
             conf -= 0.30
             misses.append("无儿童餐")
+    elif opt.get("child_friendly"):
+        conf -= 0.04   # 非亲子局：亲子店不优先（仅打破平局，不否决，避免成人局默认到'亲子餐厅'）
 
     if constraints.get("need_low_cal"):
         if opt.get("has_low_cal"):

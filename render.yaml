@@ -1,0 +1,19 @@
+# Render 一键部署蓝图（Blueprint）。密钥在平台后台填，不进仓库。
+services:
+  - type: web
+    name: decisionmate
+    runtime: python
+    plan: free
+    buildCommand: ""
+    startCommand: python -m agent.web
+    envVars:
+      - key: AGENT_LLM_ENABLED        # true 才启用真实 LLM（不填则走本地 Mock，仍可完整演示）
+        sync: false
+      - key: AGENT_LLM_BASE_URL       # OpenAI 兼容中转站，如 https://xxx/v1
+        sync: false
+      - key: AGENT_LLM_API_KEY        # 你的 LLM key（平台密钥，sync:false 不写入仓库）
+        sync: false
+      - key: AGENT_LLM_MODEL          # 如 claude-3-5-sonnet-20241022
+        sync: false
+      - key: AGENT_AMAP_KEY           # 你的高德 Web 服务 key
+        sync: false
